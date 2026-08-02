@@ -5,11 +5,14 @@
   "description": "AI 绘画提示词经验记录与语义检索，支持向量搜索历史笔记",
   "author": {
     "name": "LegnaW",
-    "url": "https://github.com/MaiM-with-u"
+    "url": "https://github.com/LegnaW"
   },
   "license": "MIT",
   "urls": {
-    "repository": "https://github.com/LegnaW/mai-prompt-journal"
+    "repository": "https://github.com/LegnaW/mai-prompt-journal",
+    "homepage": "https://github.com/LegnaW/mai-prompt-journal",
+    "documentation": "https://github.com/LegnaW/mai-prompt-journal/blob/main/README.md",
+    "issues": "https://github.com/LegnaW/mai-prompt-journal/issues"
   },
   "host_application": {
     "min_version": "1.0.0",
