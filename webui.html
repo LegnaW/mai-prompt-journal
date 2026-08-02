@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>麦麦的绘图笔记本</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: system-ui, -apple-system, sans-serif; background: #f0f2f5; color: #333; padding: 16px; }
+.container { max-width: 1000px; margin: 0 auto; }
+h1 { font-size: 1.4em; margin-bottom: 12px; }
+.card { background: #fff; border-radius: 8px; padding: 16px; margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+input[type="text"], input[type="password"], select, textarea {
+  border: 1px solid #ddd; border-radius: 6px; padding: 8px 12px; font-size: 14px; outline: none;
+}
+input[type="text"]:focus, textarea:focus { border-color: #4f9afe; }
+input[type="text"] { flex: 1; min-width: 120px; }
+.btn {
+  padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px;
+  background: #4f9afe; color: #fff; transition: background 0.2s;
+}
+.btn:hover { background: #3a8bef; }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
+.btn-danger { background: #e74c3c; }
+.btn-danger:hover { background: #c0392b; }
+.btn-success { background: #27ae60; }
+.btn-success:hover { background: #229954; }
+.btn-outline { background: #fff; color: #666; border: 1px solid #ddd; }
+.btn-outline:hover { background: #f5f5f5; }
+.status-bar { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 8px; }
+.nb-badge { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 12px; font-size: 13px; background: #e8f0fe; color: #3a8bef; }
+.nb-badge.stale { background: #fff3e0; color: #e65100; }
+.nb-badge.no-index { background: #fce4ec; color: #c62828; }
+.nb-badge.ok { background: #e8f5e9; color: #2e7d32; }
+table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #eee; font-size: 14px; }
+th { color: #999; font-weight: 500; font-size: 12px; text-transform: uppercase; }
+td .id { font-family: monospace; font-size: 12px; color: #999; }
+td .nb { font-size: 12px; color: #3a8bef; }
+.pagination { display: flex; gap: 8px; align-items: center; justify-content: center; margin-top: 12px; }
+.hidden { display: none !important; }
+.login-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 999; }
+.login-box { background: #fff; padding: 24px; border-radius: 12px; text-align: center; }
+.login-box input { margin: 8px 0; }
+.score { color: #999; font-size: 12px; }
+textarea { width: 100%; resize: vertical; }
+textarea::placeholder { color: #bbb; }
+.add-form { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 8px; }
+.add-form input { width: 100%; }
+@media (max-width: 600px) { .add-form { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="row" style="justify-content: space-between; margin-bottom: 12px;">
+    <h1>📒 麦麦的绘图笔记本</h1>
+    <div class="row">
+      <button class="btn btn-outline btn-sm" onclick="doRefresh()">刷新</button>
+      <button class="btn btn-outline btn-sm" onclick="doRebuild()">重建索引</button>
+      <button class="btn btn-outline btn-sm" onclick="doRebuildFull()">全量重构索引</button>
+      <button class="btn btn-outline btn-sm" onclick="document.getElementById('dedupCard').classList.toggle('hidden')">去重</button>
+      <button class="btn btn-outline btn-sm" onclick="document.getElementById('organizeDbCard').classList.toggle('hidden')">操作数据库</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="status-bar" id="statusBar">加载中...</div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <input type="text" id="searchInput" placeholder="搜索关键词..." onkeydown="if(event.key==='Enter')doSearch()">
+      <select id="searchNotebook"><option value="default">default</option><option value="all">全部</option></select>
+      <button class="btn" onclick="doSearch()">搜索</button>
+      <button class="btn btn-outline" onclick="loadNotes()">浏览全部</button>
+    </div>
+    <div id="searchResults"></div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="margin-bottom: 8px;">
+      <strong>添加笔记</strong>
+    </div>
+    <div class="add-form">
+      <input type="text" id="addEn" placeholder="英文标签">
+      <input type="text" id="addZh" placeholder="中文释义">
+      <input type="text" id="addNote" placeholder="备注（可选）">
+      <button class="btn btn-success" onclick="doAdd()">添加</button>
+    </div>
+    <div class="row" style="margin-top: 8px;">
+      <label>目标笔记本:</label>
+      <select id="addNotebook"><option value="default">default</option></select>
+    </div>
+  </div>
+
+  <div class="card hidden" id="notesCard">
+    <div class="row" style="justify-content: space-between; margin-bottom: 8px;">
+      <strong id="notesTitle">笔记列表</strong>
+      <button class="btn btn-outline btn-sm" onclick="document.getElementById('notesCard').classList.add('hidden')">关闭</button>
+    </div>
+    <div style="overflow-x: auto;">
+      <table>
+        <thead><tr><th>来源</th><th>英文</th><th>中文</th><th>备注</th><th>ID</th><th>操作</th></tr></thead>
+        <tbody id="notesBody"></tbody>
+      </table>
+    </div>
+    <div class="pagination" id="pagination"></div>
+  </div>
+
+  <div class="card hidden" id="dedupCard">
+    <div class="row" style="justify-content: space-between; margin-bottom: 8px;">
+      <strong>语义去重扫描</strong>
+      <button class="btn btn-outline btn-sm" onclick="document.getElementById('dedupCard').classList.add('hidden')">关闭</button>
+    </div>
+    <div class="row" style="margin-bottom: 12px;">
+      <label>笔记本:</label>
+      <select id="dedupNotebook"><option value="default">default</option></select>
+      <label>阈值:</label>
+      <input type="range" id="dedupThreshold" min="0.5" max="0.99" step="0.01" value="0.92" style="flex:0 0 120px;" oninput="document.getElementById('thresholdValue').textContent=this.value">
+      <span id="thresholdValue">0.92</span>
+      <button class="btn" onclick="doDedupScan()">扫描</button>
+    </div>
+    <div id="dedupResults"></div>
+  </div>
+
+  <div class="card hidden" id="organizeDbCard">
+    <div class="row" style="justify-content: space-between; margin-bottom: 8px;">
+      <strong>LLM 操作数据库</strong>
+      <button class="btn btn-outline btn-sm" onclick="document.getElementById('organizeDbCard').classList.add('hidden')">关闭</button>
+    </div>
+    <div class="row" style="margin-bottom: 12px;">
+      <label>笔记本:</label>
+      <select id="organizeDbNotebook"><option value="default">default</option></select>
+      <button class="btn" onclick="doOrganizeDbPlan()">生成操作方案</button>
+    </div>
+    <div style="margin-bottom: 12px;">
+      <div class="row" style="margin-bottom: 4px;">
+        <label>模式:</label>
+        <label><input type="radio" name="organizeDbMode" value="write"> 写入笔记</label>
+        <label><input type="radio" name="organizeDbMode" value="organize" checked> 整理笔记</label>
+      </div>
+      <div style="font-size:12px;color:#999;">选项将影响请求提示词：选择"写入笔记"时输入你想要学习的提示词全文；选择"整理笔记"时输入你的整理要求。每次点击"生成操作方案"都会新建对话。</div>
+    </div>
+    <div style="margin-bottom: 12px;">
+      <label style="display:block; margin-bottom:4px;">操作要求（随请求提交给 AI）:</label>
+      <textarea id="organizeDbRequirement" rows="2" placeholder="写入笔记：粘贴你想学习的提示词全文；整理笔记：填写整理要求"></textarea>
+    </div>
+    <div id="organizeDbResult"></div>
+  </div>
+</div>
+
+<div class="login-overlay hidden" id="loginOverlay">
+  <div class="login-box">
+    <h3>🔑 请输入访问密码</h3>
+    <input type="password" id="loginPassword" placeholder="密码" onkeydown="if(event.key==='Enter')doLogin()">
+    <br>
+    <button class="btn" onclick="doLogin()">确认</button>
+  </div>
+</div>
+
+<script>
+let token = localStorage.getItem('mpj_token') || new URLSearchParams(location.search).get('token') || '';
+let currentPage = 1;
+let currentNotebook = 'default';
+
+function api(method, path, body) {
+  const opts = { method, headers: {} };
+  if (token) opts.headers['Authorization'] = 'Bearer ' + token;
+  if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+  return fetch(path, opts).then(r => {
+    if (r.status === 401) { showLogin(); throw new Error('unauthorized'); }
+    return r.json();
+  });
+}
+
+function showLogin() { document.getElementById('loginOverlay').classList.remove('hidden'); }
+function doLogin() {
+  const pwd = document.getElementById('loginPassword').value;
+  token = pwd;
+  localStorage.setItem('mpj_token', pwd);
+  document.getElementById('loginOverlay').classList.add('hidden');
+  loadStatus();
+}
+
+function loadStatus() {
+  api('GET', '/api/status').then(data => {
+    const bar = document.getElementById('statusBar');
+    bar.innerHTML = '';
+    const sel1 = document.getElementById('searchNotebook');
+    const sel2 = document.getElementById('addNotebook');
+    const sel3 = document.getElementById('dedupNotebook');
+    const sel4 = document.getElementById('organizeDbNotebook');
+    sel1.innerHTML = '<option value="default">default</option><option value="all">全部</option>';
+    sel2.innerHTML = '<option value="default">default</option>';
+    sel3.innerHTML = '<option value="default">default</option>';
+    sel4.innerHTML = '<option value="default">default</option>';
+    (data.notebooks || []).forEach(nb => {
+      const cls = nb.status === 'ok' ? 'ok' : nb.status === 'stale' ? 'stale' : 'no-index';
+      const icon = nb.status === 'ok' ? '✓' : nb.status === 'stale' ? '✗' : '○';
+      bar.innerHTML += `<span class="nb-badge ${cls}">${nb.name} (${nb.count}${icon})</span>`;
+      if (nb.name !== 'default') {
+        sel1.innerHTML += `<option value="${nb.name}">${nb.name}</option>`;
+        sel2.innerHTML += `<option value="${nb.name}">${nb.name}</option>`;
+        sel3.innerHTML += `<option value="${nb.name}">${nb.name}</option>`;
+        sel4.innerHTML += `<option value="${nb.name}">${nb.name}</option>`;
+      }
+    });
+    if (!data.notebooks || data.notebooks.length === 0) bar.innerHTML = '<span style="color:#999">暂无笔记本</span>';
+  }).catch(() => {});
+}
+
+function doSearch() {
+  const q = document.getElementById('searchInput').value.trim();
+  const nb = document.getElementById('searchNotebook').value;
+  if (!q) return;
+  api('GET', `/api/search?q=${encodeURIComponent(q)}&notebook=${nb}&limit=20`).then(data => {
+    const div = document.getElementById('searchResults');
+    if (!data.results || data.results.length === 0) { div.innerHTML = '<p style="color:#999;padding:8px">未找到相关笔记</p>'; return; }
+    div.innerHTML = '<table><thead><tr><th>来源</th><th>英文</th><th>中文</th><th>备注</th><th>相似度</th><th>ID</th><th>操作</th></tr></thead><tbody>' +
+      data.results.map(r => `<tr>
+        <td class="nb">${r.notebook||nb}</td><td>${esc(r.en)}</td><td>${esc(r.zh)}</td><td>${esc(r.note||'')}</td>
+        <td class="score">${(r.score||0).toFixed(2)}</td><td class="id">${r.id}</td>
+        <td>
+          <button class="btn btn-sm" onclick="startEdit('${r.id}','${r.notebook||nb}')">编辑</button>
+          <button class="btn btn-danger btn-sm" onclick="doDelete('${r.id}','${r.notebook||nb}')">删除</button>
+        </td>
+      </tr>
+      <tr id="editrow_${r.id}" class="hidden">
+        <td colspan="7">
+          <div class="row">
+            <input type="text" id="editen_${r.id}" placeholder="英文" value="${esc(r.en||'')}">
+            <input type="text" id="editzh_${r.id}" placeholder="中文" value="${esc(r.zh||'')}">
+            <input type="text" id="editnote_${r.id}" placeholder="备注" value="${esc(r.note||'')}">
+            <button class="btn btn-sm btn-success" onclick="saveEdit('${r.id}','${r.notebook||nb}')">保存</button>
+            <button class="btn btn-sm btn-outline" onclick="cancelEdit('${r.id}')">取消</button>
+          </div>
+        </td>
+      </tr>`).join('') + '</tbody></table>';
+  }).catch(() => {});
+}
+
+function startEdit(id, nb) {
+  const row = document.getElementById('editrow_' + id);
+  if (row) row.classList.remove('hidden');
+}
+
+function cancelEdit(id) {
+  const row = document.getElementById('editrow_' + id);
+  if (row) row.classList.add('hidden');
+}
+
+function saveEdit(id, nb) {
+  const en = document.getElementById('editen_' + id).value.trim();
+  const zh = document.getElementById('editzh_' + id).value.trim();
+  const note = document.getElementById('editnote_' + id).value.trim();
+  if (!en || !zh) { alert('英文和中文不能为空'); return; }
+  api('POST', '/api/modify', { note_id: id, notebook: nb, en: en, zh: zh, note: note }).then(data => {
+    if (data.error) { alert(data.error); return; }
+    cancelEdit(id);
+    doSearch();
+  }).catch(() => {});
+}
+
+function loadNotes() {
+  const nb = document.getElementById('searchNotebook').value;
+  if (nb === 'all') { alert('请选择具体笔记本浏览'); return; }
+  currentNotebook = nb;
+  currentPage = 1;
+  fetchNotes();
+}
+
+function fetchNotes() {
+  api('GET', `/api/notes?notebook=${currentNotebook}&page=${currentPage}&size=20`).then(data => {
+    document.getElementById('notesCard').classList.remove('hidden');
+    document.getElementById('notesTitle').textContent = `${currentNotebook} (${data.total} 条)`;
+    const tbody = document.getElementById('notesBody');
+    tbody.innerHTML = (data.notes || []).map(n => `<tr>
+      <td class="nb">${currentNotebook}</td>
+      <td>${esc(n.en)}</td><td>${esc(n.zh)}</td><td>${esc(n.note||'')}</td>
+      <td class="id">${n.id}</td>
+      <td><button class="btn btn-danger btn-sm" onclick="doDelete('${n.id}','${currentNotebook}')">删除</button></td>
+    </tr>`).join('') || '<tr><td colspan="6" style="color:#999;text-align:center">空</td></tr>';
+    const pag = document.getElementById('pagination');
+    pag.innerHTML = '';
+    if (data.pages > 1) {
+      pag.innerHTML += `<button class="btn btn-outline btn-sm" ${currentPage<=1?'disabled':''} onclick="currentPage--;fetchNotes()">上一页</button>`;
+      pag.innerHTML += `<span> ${currentPage} / ${data.pages} </span>`;
+      pag.innerHTML += `<button class="btn btn-outline btn-sm" ${currentPage>=data.pages?'disabled':''} onclick="currentPage++;fetchNotes()">下一页</button>`;
+    }
+  }).catch(() => {});
+}
+
+function doAdd() {
+  const en = document.getElementById('addEn').value.trim();
+  const zh = document.getElementById('addZh').value.trim();
+  const note = document.getElementById('addNote').value.trim();
+  const nb = document.getElementById('addNotebook').value;
+  if (!en || !zh) { alert('英文和中文必填'); return; }
+  api('POST', '/api/add', { notebook: nb, notes: [{ en, zh, note }] }).then(data => {
+    if (data.error) { alert(data.error); return; }
+    document.getElementById('addEn').value = '';
+    document.getElementById('addZh').value = '';
+    document.getElementById('addNote').value = '';
+    loadStatus();
+    alert('已添加');
+  }).catch(() => {});
+}
+
+function doDelete(id, nb) {
+  if (!confirm(`确认删除笔记 ${id}？`)) return;
+  api('POST', '/api/delete', { note_id: id, notebook: nb }).then(data => {
+    if (data.error) { alert(data.error); return; }
+    loadStatus();
+    const visible = !document.getElementById('notesCard').classList.contains('hidden');
+    if (visible) fetchNotes(); else doSearch();
+  }).catch(() => {});
+}
+
+function doRefresh() {
+  api('POST', '/api/refresh').then(data => {
+    loadStatus();
+    alert('已刷新');
+  }).catch(() => {});
+}
+
+function doRebuild() {
+  if (!confirm('确认重建所有笔记本索引？可能需要一些时间。')) return;
+  api('POST', '/api/rebuild').then(data => {
+    const lines = (data.results || []).map(r => r.error ? `${r.notebook}: 失败` : `${r.notebook}: ${r.total}条(复用${r.reused},新建${r.rebuilt})`);
+    alert('重建完成:\n' + lines.join('\n'));
+    loadStatus();
+  }).catch(() => {});
+}
+
+function doRebuildFull() {
+  if (!confirm('确认全量重构所有笔记本索引？将忽略缓存、全部重新计算向量（换 embedding 模型后使用），可能需要较长时间。')) return;
+  api('POST', '/api/rebuild', { force: true }).then(data => {
+    const lines = (data.results || []).map(r => r.error ? `${r.notebook}: 失败` : `${r.notebook}: ${r.total}条(复用${r.reused},新建${r.rebuilt})`);
+    alert('全量重构完成:\n' + lines.join('\n'));
+    loadStatus();
+  }).catch(() => {});
+}
+
+let dedupGroups = [];
+let dedupPreviews = {};
+
+function renderDedupGroups(data) {
+  const div = document.getElementById('dedupResults');
+  if (!data.groups || data.groups.length === 0) {
+    div.innerHTML = '<p style="color:#2e7d32">未发现重复</p>';
+    dedupGroups = [];
+    return;
+  }
+  dedupGroups = data.groups;
+  dedupPreviews = {};
+  div.innerHTML = `<p>发现 ${data.groups.length} 组潜在重复（阈值 ${data.threshold}）</p>` +
+    data.groups.map((group, gi) => `
+      <div style="border:1px solid #eee;padding:12px;margin:8px 0;border-radius:8px">
+        <strong>重复组 ${gi+1}（${group.entries.length} 条）</strong>
+        ${group.entries.map((e, ei) => `
+          <div class="row" style="margin:6px 0">
+            <input type="radio" name="keep_${gi}" value="${e.id}" ${ei===0?'checked':''} style="flex:0 0 auto">
+            <span style="flex:1">${esc(e.en)} / ${esc(e.zh)}${e.note?' — '+esc(e.note):''}</span>
+            <span class="id">${e.id}</span>
+          </div>
+        `).join('')}
+        <input type="text" id="req_${gi}" placeholder="该组整理意见（可选，LLM 整理时提交）" style="width:100%; font-size:12px; margin:8px 0;">
+        <div class="row" style="margin-top:8px;">
+          <button class="btn btn-sm" onclick="doDirectPreview(${gi})">直接合并</button>
+          <button class="btn btn-sm btn-success" onclick="doOrganizePreview(${gi})">LLM 整理</button>
+          <button class="btn btn-sm btn-outline" onclick="doClearPreview(${gi})">取消预览</button>
+        </div>
+        <div id="preview_${gi}" style="margin-top:8px;"></div>
+      </div>
+    `).join('');
+}
+
+function doDedupScan() {
+  const nb = document.getElementById('dedupNotebook').value;
+  const threshold = document.getElementById('dedupThreshold').value;
+  const div = document.getElementById('dedupResults');
+  div.innerHTML = '<p style="color:#999">扫描中...</p>';
+  api('GET', `/api/dedup/scan?notebook=${encodeURIComponent(nb)}&threshold=${threshold}`).then(data => {
+    if (data.error) { div.innerHTML = `<p style="color:#c62828">${data.error}</p>`; return; }
+    renderDedupGroups(data);
+  }).catch(() => {});
+}
+
+function doDirectPreview(gi) {
+  const group = dedupGroups[gi];
+  const checked = document.querySelector(`input[name="keep_${gi}"]:checked`);
+  if (!checked) { alert('请选择要保留的条目'); return; }
+  const keepId = checked.value;
+  const keep = group.entries.find(e => e.id === keepId);
+  const deleteIds = group.entries.filter(e => e.id !== keepId).map(e => e.id);
+  const mergedNote = group.entries.map(e => e.note || '').filter(n => n.trim()).join(' | ');
+  dedupPreviews[gi] = { mode: 'direct', keepId, deleteIds };
+  const box = document.getElementById('preview_' + gi);
+  box.innerHTML = `
+    <div style="background:#f8f9fa;padding:10px;border-radius:6px;">
+      <div>将保留 <span class="id">${keepId}</span>，删除 ${deleteIds.length} 条。</div>
+      <div>整理结果（理由：无，直接合并）:</div>
+      <div>${esc(keep.en)} / ${esc(keep.zh)}${mergedNote ? ' — ' + esc(mergedNote) : ''}</div>
+      <div class="row" style="margin-top:8px;">
+        <button class="btn btn-sm btn-success" onclick="doResolve(${gi})">确认合并</button>
+      </div>
+    </div>`;
+}
+
+function doOrganizePreview(gi) {
+  const group = dedupGroups[gi];
+  const box = document.getElementById('preview_' + gi);
+  const reqEl = document.getElementById('req_' + gi);
+  const requirement = reqEl ? reqEl.value.trim() : '';
+  const entries = group.entries.map(e => ({ en: e.en, zh: e.zh, note: e.note || '' }));
+  box.innerHTML = '<p style="color:#999">LLM 整理中...</p>';
+  api('POST', '/api/dedup/organize_preview', {
+    notebook: document.getElementById('dedupNotebook').value,
+    entries: entries,
+    requirement: requirement,
+  }).then(data => {
+    if (data.error) { box.innerHTML = `<p style="color:#c62828">${data.error}</p>`; return; }
+    dedupPreviews[gi] = { mode: 'organize', deleteIds: group.entries.map(e => e.id), newEntries: data.entries, reason: data.reason };
+    box.innerHTML = `
+      <div style="background:#f8f9fa;padding:10px;border-radius:6px;">
+        <div><strong>整理理由：</strong>${esc(data.reason || '')}</div>
+        <div style="margin-top:6px;"><strong>整理结果（${data.entries.length} 条，将替换整组 ${group.entries.length} 条）：</strong></div>
+        ${data.entries.map((e, i) => `<div style="margin-top:4px;">${i+1}. ${esc(e.en)} / ${esc(e.zh)}${e.note ? ' — ' + esc(e.note) : ''}</div>`).join('')}
+        <div class="row" style="margin-top:8px;">
+          <button class="btn btn-sm btn-success" onclick="doResolve(${gi})">确认整理</button>
+        </div>
+      </div>`;
+  }).catch(() => { box.innerHTML = '<p style="color:#c62828">LLM 整理失败，请重试</p>'; });
+}
+
+function doClearPreview(gi) {
+  delete dedupPreviews[gi];
+  const box = document.getElementById('preview_' + gi);
+  if (box) box.innerHTML = '';
+}
+
+function doResolve(gi) {
+  const p = dedupPreviews[gi];
+  if (!p) { alert('请先生成预览'); return; }
+  const nb = document.getElementById('dedupNotebook').value;
+  const threshold = document.getElementById('dedupThreshold').value;
+  const payload = { notebook: nb, mode: p.mode, threshold: threshold, delete_ids: p.deleteIds };
+  if (p.mode === 'direct') {
+    if (!confirm(`确认直接合并？将保留 ${p.keepId}，删除 ${p.deleteIds.length} 条`)) return;
+    payload.keep_id = p.keepId;
+  } else {
+    if (!confirm(`确认按 LLM 整理结果替换整组？将删除 ${p.deleteIds.length} 条，写入 ${p.newEntries.length} 条`)) return;
+    payload.new_entries = p.newEntries;
+  }
+  api('POST', '/api/dedup/resolve', payload).then(data => {
+    if (data.error) { alert(data.error); return; }
+    alert(`已处理，剩余 ${data.remaining} 条；索引已重建（复用${data.rebuild.reused}，新建${data.rebuild.rebuilt}）`);
+    dedupPreviews = {};
+    renderDedupGroups(data);
+    loadStatus();
+  }).catch(() => {});
+}
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s||''; return d.innerHTML; }
+
+let organizeDbPlan = null;
+let organizeDbSessionId = null;
+let organizeDbTaskId = null;
+
+const ORGANIZE_DB_MODE_PROMPTS = {
+  write: '阅读以下提示词，找出有学习价值且没有与已知数据库重复的提示词片段。应优先记录有意义的 tag 组合或搭配（如形象设计、表情动作、背景、氛围、服装与配饰等彼此搭配形成的完整特征，一般由 3~6 个 tag 构成），不要只记录孤立、通用的单一 tag——单独一个常见 tag 通常缺乏学习价值且容易与已有条目重复。若关键描述片段本身是用自然语言写成的，也可以直接以这段自然语言进行记录。对每个片段在note中简要总结其作用并给出使用场景。',
+  organize: '请按照以下要求整理笔记。',
+};
+
+function getOrganizeDbMode() {
+  const el = document.querySelector('input[name="organizeDbMode"]:checked');
+  return el ? el.value : 'organize';
+}
+
+function doOrganizeDbPlan() {
+  const nb = document.getElementById('organizeDbNotebook').value;
+  const mode = getOrganizeDbMode();
+  const userReq = document.getElementById('organizeDbRequirement').value.trim();
+  const modePrompt = ORGANIZE_DB_MODE_PROMPTS[mode] || ORGANIZE_DB_MODE_PROMPTS.organize;
+  const requirement = (modePrompt + (userReq ? '\n\n' + userReq : '')).trim();
+  const div = document.getElementById('organizeDbResult');
+  div.innerHTML = '<p style="color:#999">LLM 正在思考中...</p>';
+  api('POST', '/api/organize_db/plan', { notebook: nb, requirement: requirement }).then(data => {
+    if (data.error) { div.innerHTML = `<p style="color:#c62828">${esc(data.error)}</p>`; return; }
+    organizeDbTaskId = data.task_id || null;
+    if (organizeDbTaskId) { pollOrganizeDbTask(); return; }
+    div.innerHTML = '<p style="color:#c62828">未获取到任务 ID，请重试</p>';
+  }).catch(() => { div.innerHTML = '<p style="color:#c62828">生成方案失败，请重试</p>'; });
+}
+
+function doOrganizeDbAppend() {
+  if (!organizeDbSessionId) { alert('请先生成操作方案'); return; }
+  const reqEl = document.getElementById('organizeDbSupplement');
+  const req = reqEl ? reqEl.value.trim() : '';
+  if (!req) { alert('请先输入补充要求'); return; }
+  const nb = document.getElementById('organizeDbNotebook').value;
+  const div = document.getElementById('organizeDbResult');
+  div.innerHTML = '<p style="color:#999">LLM 正在思考中...</p>';
+  api('POST', '/api/organize_db/plan', { notebook: nb, session_id: organizeDbSessionId, requirement: req }).then(data => {
+    if (data.error) {
+      div.innerHTML = (organizeDbPlan ? renderOrganizeDbPlan(organizeDbPlan) : '') + `<p style="color:#c62828">${esc(data.error)}</p>`;
+      return;
+    }
+    organizeDbTaskId = data.task_id || null;
+    if (organizeDbTaskId) { pollOrganizeDbTask(); return; }
+    div.innerHTML = '<p style="color:#c62828">未获取到任务 ID，请重试</p>';
+  }).catch(() => {
+    div.innerHTML = (organizeDbPlan ? renderOrganizeDbPlan(organizeDbPlan) : '') + '<p style="color:#c62828">补充失败，请重试</p>';
+  });
+}
+
+function pollOrganizeDbTask() {
+  const div = document.getElementById('organizeDbResult');
+  const poll = () => {
+    if (!organizeDbTaskId) return;
+    api('GET', `/api/organize_db/plan_status?task_id=${encodeURIComponent(organizeDbTaskId)}`).then(data => {
+      if (data.error) {
+        organizeDbTaskId = null;
+        div.innerHTML = (organizeDbPlan ? renderOrganizeDbPlan(organizeDbPlan) : '') + `<p style="color:#c62828">${esc(data.error)}</p>`;
+        return;
+      }
+      if (data.status === 'running') {
+        const searches = data.searches || [];
+        if (searches.length === 0) {
+          div.innerHTML = '<p style="color:#999">LLM 正在思考中...</p>';
+        } else {
+          const last = searches[searches.length - 1];
+          div.innerHTML = `<p style="color:#999">LLM 正在检索：'${esc(last.keyword || '')}'（已检索 ${searches.length} 次）...</p>`;
+        }
+        setTimeout(poll, 1000);
+        return;
+      }
+      organizeDbTaskId = null;
+      if (data.status === 'error') {
+        div.innerHTML = (organizeDbPlan ? renderOrganizeDbPlan(organizeDbPlan) : '') + `<p style="color:#c62828">${esc(data.error || '操作失败')}</p>`;
+        return;
+      }
+      const plan = data.plan;
+      organizeDbSessionId = plan.session_id || null;
+      organizeDbPlan = plan;
+      div.innerHTML = renderOrganizeDbPlan(plan);
+    }).catch(() => {
+      organizeDbTaskId = null;
+      div.innerHTML = '<p style="color:#c62828">获取任务状态失败，请重试</p>';
+    });
+  };
+  poll();
+}
+
+function renderOrganizeDbPlan(data) {
+  const ops = data.operations || [];
+  let lines = '<div style="background:#f8f9fa;padding:10px;border-radius:6px;">';
+  lines += `<div><strong>操作说明：</strong>${esc(data.reason || '')}</div>`;
+  if (ops.length === 0) {
+    lines += '<div style="margin-top:6px;color:#2e7d32">方案为空：无需修改</div>';
+  } else {
+    lines += `<div style="margin-top:6px;"><strong>共 ${ops.length} 条操作：</strong></div>`;
+    ops.forEach((op, i) => {
+      if (op.type === 'create') {
+        lines += `<div style="margin-top:4px;color:#2e7d32">${i+1}. 新建: ${esc(op.en)} / ${esc(op.zh)}${op.note ? ' — ' + esc(op.note) : ''}</div>`;
+      } else if (op.type === 'update') {
+        const old = op._old || {};
+        const fields = [];
+        if (op.en !== undefined) fields.push(`en: ${esc(old.en||'')} → ${esc(op.en)}`);
+        if (op.zh !== undefined) fields.push(`zh: ${esc(old.zh||'')} → ${esc(op.zh)}`);
+        if (op.note !== undefined) fields.push(`note: ${esc(old.note||'')} → ${esc(op.note)}`);
+        lines += `<div style="margin-top:4px;color:#1565c0">${i+1}. 修改 ${esc(op.id)}: ${fields.join('；')}</div>`;
+      } else if (op.type === 'delete') {
+        const old = op._old || {};
+        lines += `<div style="margin-top:4px;color:#c62828">${i+1}. 删除 ${esc(op.id)}（${esc(old.en||'')} / ${esc(old.zh||'')}）</div>`;
+      } else {
+        lines += `<div style="margin-top:4px;color:#999">${i+1}. ${esc(op.type)}</div>`;
+      }
+    });
+  }
+  lines += `<div class="row" style="margin-top:10px;align-items:stretch;">
+    <input type="text" id="organizeDbSupplement" placeholder="补充要求（可选，追加后 AI 将重新生成完整方案覆盖本轮）" style="flex:1;min-width:0;">
+    <button class="btn btn-sm btn-outline" onclick="doOrganizeDbAppend()">追加要求</button>
+  </div>`;
+  lines += `<div class="row" style="margin-top:8px;">
+    <button class="btn btn-sm btn-success" onclick="doOrganizeDbApply()">确认执行</button>
+    <button class="btn btn-sm btn-outline" onclick="clearOrganizeDb()">清除</button>
+  </div></div>`;
+  return lines;
+}
+
+function clearOrganizeDb() {
+  organizeDbPlan = null;
+  organizeDbSessionId = null;
+  organizeDbTaskId = null;
+  document.getElementById('organizeDbResult').innerHTML = '';
+}
+
+function doOrganizeDbApply() {
+  if (!organizeDbPlan) { alert('请先生成操作方案'); return; }
+  const ops = organizeDbPlan.operations || [];
+  if (ops.length === 0) { alert('方案为空，无需执行'); return; }
+  const nb = document.getElementById('organizeDbNotebook').value;
+  if (!confirm(`确认执行 ${ops.length} 条操作？执行后索引将重建。`)) return;
+  api('POST', '/api/organize_db/apply', {
+    notebook: nb,
+    operations: ops,
+    session_id: organizeDbSessionId || undefined,
+  }).then(data => {
+    if (data.error) { alert(data.error); return; }
+    alert(`已执行，剩余 ${data.remaining} 条；索引已重建（复用${data.rebuild.reused}，新建${data.rebuild.rebuilt}）`);
+    clearOrganizeDb();
+    loadStatus();
+  }).catch(() => {});
+}
+
+loadStatus();
+</script>
+</body>
+</html>

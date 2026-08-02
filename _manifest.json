@@ -1,0 +1,49 @@
+{
+  "manifest_version": 2,
+  "version": "2.0.0",
+  "name": "麦麦的绘图笔记本",
+  "description": "AI 绘画提示词经验记录与语义检索，支持向量搜索历史笔记",
+  "author": {
+    "name": "LegnaW",
+    "url": "https://github.com/MaiM-with-u"
+  },
+  "license": "MIT",
+  "urls": {
+    "repository": "https://github.com/LegnaW/mai-prompt-journal"
+  },
+  "host_application": {
+    "min_version": "1.0.0",
+    "max_version": "1.99.99"
+  },
+  "sdk": {
+    "min_version": "2.0.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [
+    {
+      "type": "python_package",
+      "name": "numpy",
+      "version_spec": ">=1.20.0"
+    },
+    {
+      "type": "python_package",
+      "name": "aiohttp",
+      "version_spec": ">=3.8.0"
+    }
+  ],
+  "capabilities": [
+    "send.text",
+    "llm.embed",
+    "component.disable",
+    "component.enable"
+  ],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "locales_path": "_locales",
+    "supported_locales": [
+      "zh-CN"
+    ]
+  },
+  "plugin_type": "tool",
+  "id": "mai.prompt-journal"
+}

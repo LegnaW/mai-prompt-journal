@@ -1,0 +1,26 @@
+# 敏感配置：绝不提交（含 API 密钥），由插件自动生成
+config.toml
+config_back/
+
+# Python
+__pycache__/
+*.py[codz]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+
+# 测试 / 缓存
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.cache/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log
