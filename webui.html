@@ -258,7 +258,8 @@ function saveEdit(id, nb) {
   api('POST', '/api/modify', { note_id: id, notebook: nb, en: en, zh: zh, note: note }).then(data => {
     if (data.error) { alert(data.error); return; }
     cancelEdit(id);
-    doSearch();
+    const notesVisible = !document.getElementById('notesCard').classList.contains('hidden');
+    if (notesVisible) fetchNotes(); else doSearch();
   }).catch(() => {});
 }
 
@@ -279,7 +280,21 @@ function fetchNotes() {
       <td class="nb">${currentNotebook}</td>
       <td>${esc(n.en)}</td><td>${esc(n.zh)}</td><td>${esc(n.note||'')}</td>
       <td class="id">${n.id}</td>
-      <td><button class="btn btn-danger btn-sm" onclick="doDelete('${n.id}','${currentNotebook}')">删除</button></td>
+      <td>
+        <button class="btn btn-sm" onclick="startEdit('${n.id}','${currentNotebook}')">编辑</button>
+        <button class="btn btn-danger btn-sm" onclick="doDelete('${n.id}','${currentNotebook}')">删除</button>
+      </td>
+    </tr>
+    <tr id="editrow_${n.id}" class="hidden">
+      <td colspan="6">
+        <div class="row">
+          <input type="text" id="editen_${n.id}" placeholder="英文" value="${esc(n.en||'')}">
+          <input type="text" id="editzh_${n.id}" placeholder="中文" value="${esc(n.zh||'')}">
+          <input type="text" id="editnote_${n.id}" placeholder="备注" value="${esc(n.note||'')}">
+          <button class="btn btn-sm btn-success" onclick="saveEdit('${n.id}','${currentNotebook}')">保存</button>
+          <button class="btn btn-sm btn-outline" onclick="cancelEdit('${n.id}')">取消</button>
+        </div>
+      </td>
     </tr>`).join('') || '<tr><td colspan="6" style="color:#999;text-align:center">空</td></tr>';
     const pag = document.getElementById('pagination');
     pag.innerHTML = '';
