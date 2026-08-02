@@ -189,6 +189,11 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 - 配置：`config.web.enabled` / `port`（默认 8010）/ `password`（空 = 无鉴权）
 - 端口需在 Docker 中额外映射
 
+### 坑：WebUI 服务器卸载时必须 `runner.cleanup()`，否则重载不生效
+`_run_web_server` 末尾是 `await asyncio.Event().wait()`。**必须**在其 `finally` 里调用 `await self._web_runner.cleanup()` 释放端口：
+- 插件重载/卸载是**同一进程内** `on_unload` + `on_load`，若旧 server 的 socket 不释放，新 server `TCPSite.start()` 会因端口占用失败，旧 server（旧配置，如旧密码）继续服务 → 表现为"重载插件后配置（尤其密码）不生效，只有重启麦麦才行"
+- 密码本身是 `_web_check_auth` 每请求读取 `self.config.web.password`，配置热更新后立即生效；bind/port/enabled 变更需重启 server
+
 ### 认证（关键）
 - `_web_index` **必须始终返回 HTML**，鉴权由 API 端点负责（历史教训：曾因在 index 处拦截返回纯文本 401，导致用户看不到登录页）
 - `_web_check_auth`：支持 `?token=` query 参数或 `Authorization: Bearer` header，与 `password` 比对
@@ -206,6 +211,11 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 - `hint = json_schema_extra["hint"]`（不写就为空 → 没有说明文字）
 
 所以只写 `Field(description=...)` 的字段在配置页会显示"英文字段名 + 无说明"（文档 config.md 声称 description 会显示，与实际前端不符）。
+
+### 坑：manifest 的 `i18n` 是宿主必填字段，不能整体删除
+宿主 `PluginManifest` 校验要求 `i18n` 字段必须存在（否则插件**加载失败**，配置页会回退到无描述的兜底 schema，表现为"配置描述全消失"）。但 `i18n` 内部只有 `default_locale` 必填，`locales_path` / `supported_locales` 可选。
+- **正确写法**：`"i18n": {"default_locale": "zh-CN"}`（不声明 `locales_path`，就不会有"缺失 `_locales` 目录"的问题）
+- 千万别整块删掉 `i18n`（宿主报 `缺少必需字段: i18n`）。插件中心 CONTRIBUTING 建议的"移除 i18n 字段"与宿主校验矛盾，以宿主为准。
 
 ### 正解：每个字段都要 `json_schema_extra`
 ```python

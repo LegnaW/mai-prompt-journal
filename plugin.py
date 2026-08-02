@@ -52,6 +52,42 @@ _ORGANIZE_DEFAULT_REQUIREMENT = "把上述重复的提示词笔记合并整理�
 # 受 allow_write 开关控制的写入类工具（只读模式下禁用）
 _WRITE_TOOL_NAMES = ["add_aidraw_notes", "modify_aidraw_note", "delete_aidraw_note"]
 
+# WebUI 绑定非回环地址且未设置密码时，所有请求返回的警告页
+_WEBUI_WARNING_HTML = """\
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WebUI 未安全配置</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #f0f2f5; color: #333;
+         display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 16px; }
+  .box { max-width: 640px; background: #fff; border-radius: 12px; padding: 28px;
+         box-shadow: 0 2px 8px rgba(0,0,0,.1); }
+  h1 { font-size: 1.3em; color: #c62828; margin-bottom: 14px; }
+  p, li { line-height: 1.8; font-size: 15px; }
+  code { background: #f5f5f5; padding: 2px 6px; border-radius: 4px; font-size: 14px; }
+  ul { margin: 10px 0 0 20px; }
+  .tip { margin-top: 16px; padding: 10px 14px; background: #fff8e1; border-radius: 8px; font-size: 14px; color: #795548; }
+</style>
+</head>
+<body>
+  <div class="box">
+    <h1>⚠️ WebUI 未安全配置</h1>
+    <p>当前插件的 WebUI 绑定了<strong>非回环地址</strong>（非 127.0.0.1 / localhost），且<strong>未设置访问密码</strong>。
+    出于安全考虑，所有请求均被拦截，本页面之外的功能不可用。</p>
+    <p>请到<strong>麦麦的插件配置界面</strong>（或直接编辑本插件的 <code>config.toml</code> 的 <code>[web]</code> 节）做以下任意一项修改：</p>
+    <ul>
+      <li>将 <code>bind</code> 改为 <code>"127.0.0.1"</code>（仅允许本机访问），或</li>
+      <li>为 <code>password</code> 设置一个访问密码（需要对局域网/公网暴露时<strong>必须</strong>设置）。</li>
+    </ul>
+    <div class="tip">修改后请<strong>重启 / 重载插件</strong>，本警告页会自动消失。</div>
+  </div>
+</body>
+</html>"""
+
 _DEDUP_MERGE_DEFAULT_SYSTEM_PROMPT = """\
 **绘图笔记整理规则**
 1. 你是一个客观、准确的绘图提示词笔记整理程序，负责把一批重复或相似的提示词笔记整理为精简、准确的笔记。
@@ -214,7 +250,16 @@ class WebConfig(PluginConfigBase):
     password: str = Field(
         default="",
         description="访问密码，留空则无密码保护",
-        json_schema_extra={"label": "WebUI 访问密码", "hint": "访问密码，留空则无密码保护", "order": 2},
+        json_schema_extra={"label": "WebUI 访问密码", "hint": "访问密码，留空则无密码保护；绑定非回环地址时必须设置", "order": 2},
+    )
+    bind: str = Field(
+        default="127.0.0.1",
+        description="监听地址",
+        json_schema_extra={
+            "label": "监听地址",
+            "hint": "默认 127.0.0.1 仅本机可访问；改为 0.0.0.0 对外暴露时必须设置密码，否则所有请求返回安全警告页",
+            "order": 3,
+        },
     )
 
 
@@ -1556,43 +1601,72 @@ class PromptJournalPlugin(MaiBotPlugin):
 
         port = int(self.config.web.port)
         password = str(self.config.web.password or "").strip()
+        bind = str(self.config.web.bind or "").strip() or "127.0.0.1"
+
+        unsafe = not self._is_loopback_bind(bind) and not password
 
         app = web.Application(client_max_size=2 * 1024 * 1024)
-        app.router.add_get("/", self._web_index)
-        app.router.add_get("/api/status", self._web_status)
-        app.router.add_get("/api/notes", self._web_notes)
-        app.router.add_get("/api/search", self._web_search)
-        app.router.add_post("/api/add", self._web_add)
-        app.router.add_post("/api/modify", self._web_modify)
-        app.router.add_post("/api/delete", self._web_delete)
-        app.router.add_post("/api/refresh", self._web_refresh)
-        app.router.add_post("/api/rebuild", self._web_rebuild)
-        app.router.add_get("/api/dedup/scan", self._web_dedup_scan)
-        app.router.add_post("/api/dedup/resolve", self._web_dedup_resolve)
-        app.router.add_post("/api/dedup/organize_preview", self._web_organize_preview)
-        app.router.add_post("/api/organize_db/plan", self._web_organize_db_plan)
-        app.router.add_get("/api/organize_db/plan_status", self._web_organize_db_plan_status)
-        app.router.add_post("/api/organize_db/apply", self._web_organize_db_apply)
+
+        if unsafe:
+            # 安全警告模式：绑定非回环地址且未设置密码，所有请求一律返回警告页
+            self.ctx.logger.error(
+                f"WebUI 处于安全警告模式：bind={bind} 且未设置 [web] password。"
+                f"所有请求将返回警告页。请将 bind 改为 127.0.0.1 或设置密码后重启插件。"
+            )
+
+            @web.middleware
+            async def warning_middleware(request: Any, handler: Any) -> Any:
+                return web.Response(text=_WEBUI_WARNING_HTML, content_type="text/html", status=403)
+
+            app.middlewares.append(warning_middleware)
+        else:
+            app.router.add_get("/", self._web_index)
+            app.router.add_get("/api/status", self._web_status)
+            app.router.add_get("/api/notes", self._web_notes)
+            app.router.add_get("/api/search", self._web_search)
+            app.router.add_post("/api/add", self._web_add)
+            app.router.add_post("/api/modify", self._web_modify)
+            app.router.add_post("/api/delete", self._web_delete)
+            app.router.add_post("/api/refresh", self._web_refresh)
+            app.router.add_post("/api/rebuild", self._web_rebuild)
+            app.router.add_get("/api/dedup/scan", self._web_dedup_scan)
+            app.router.add_post("/api/dedup/resolve", self._web_dedup_resolve)
+            app.router.add_post("/api/dedup/organize_preview", self._web_organize_preview)
+            app.router.add_post("/api/organize_db/plan", self._web_organize_db_plan)
+            app.router.add_get("/api/organize_db/plan_status", self._web_organize_db_plan_status)
+            app.router.add_post("/api/organize_db/apply", self._web_organize_db_apply)
 
         self._web_runner = web.AppRunner(app)
         await self._web_runner.setup()
-        site = web.TCPSite(self._web_runner, "0.0.0.0", port)
+        site = web.TCPSite(self._web_runner, bind, port)
         await site.start()
         auth_note = f"，密码保护已启用" if password else ""
-        self.ctx.logger.info(f"WebUI 已启动: http://0.0.0.0:{port}{auth_note}")
+        mode_note = "（安全警告模式）" if unsafe else ""
+        self.ctx.logger.info(f"WebUI 已启动: http://{bind}:{port}{auth_note}{mode_note}")
 
-        await asyncio.Event().wait()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            # 任务取消（插件重载/卸载）时释放端口，否则旧服务器会占住端口、新配置不生效
+            try:
+                await self._web_runner.cleanup()
+            except Exception:
+                pass
+            self._web_runner = None
+
+    @staticmethod
+    def _is_loopback_bind(bind: str) -> bool:
+        """判断绑定地址是否为回环地址。"""
+        return bind.strip().lower() in {"127.0.0.1", "localhost", "::1"}
 
     def _web_check_auth(self, request: Any) -> bool:
-        """检查 WebUI 请求的密码认证。"""
+        """检查 WebUI 请求的密码认证（仅接受 Authorization: Bearer）。"""
         password = str(self.config.web.password or "").strip()
         if not password:
             return True
-        token = request.query.get("token") or ""
-        if not token:
-            auth_header = request.headers.get("Authorization", "")
-            token = auth_header.replace("Bearer ", "").strip()
-        return token == password
+        auth_header = request.headers.get("Authorization", "")
+        token = auth_header.replace("Bearer ", "").strip()
+        return bool(token) and token == password
 
     async def _web_index(self, request: Any) -> Any:
         """返回 WebUI HTML 页面，始终返回 HTML，认证由 API 端点处理。"""

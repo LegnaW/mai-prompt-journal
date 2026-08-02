@@ -41,11 +41,7 @@
     "component.enable"
   ],
   "i18n": {
-    "default_locale": "zh-CN",
-    "locales_path": "_locales",
-    "supported_locales": [
-      "zh-CN"
-    ]
+    "default_locale": "zh-CN"
   },
   "plugin_type": "tool",
   "id": "mai.prompt-journal"
