@@ -163,13 +163,11 @@ textarea::placeholder { color: #bbb; }
 </div>
 
 <script>
-let token = localStorage.getItem('mpj_token') || '';
 let currentPage = 1;
 let currentNotebook = 'default';
 
 function api(method, path, body) {
   const opts = { method, headers: {}, cache: 'no-store' };
-  if (token) opts.headers['Authorization'] = 'Bearer ' + token;
   if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
   return fetch(path, opts).then(r => {
     if (r.status === 401) { showLogin(); throw new Error('unauthorized'); }
@@ -180,10 +178,11 @@ function api(method, path, body) {
 function showLogin() { document.getElementById('loginOverlay').classList.remove('hidden'); }
 function doLogin() {
   const pwd = document.getElementById('loginPassword').value;
-  token = pwd;
-  localStorage.setItem('mpj_token', pwd);
-  document.getElementById('loginOverlay').classList.add('hidden');
-  loadStatus();
+  api('POST', '/api/login', { password: pwd }).then(data => {
+    if (data.error) { alert(data.error); return; }
+    document.getElementById('loginOverlay').classList.add('hidden');
+    loadStatus();
+  }).catch(() => {});
 }
 
 function loadStatus() {

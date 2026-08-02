@@ -196,8 +196,10 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 
 ### 认证（关键）
 - `_web_index` **必须始终返回 HTML**，鉴权由 API 端点负责（历史教训：曾因在 index 处拦截返回纯文本 401，导致用户看不到登录页）
-- `_web_check_auth`：支持 `?token=` query 参数或 `Authorization: Bearer` header，与 `password` 比对
-- 前端 JS 从 URL/localStorage 取 token，API 401 时弹出登录框
+- 登录走 `POST /api/login`：校验密码后 `set_cookie("mpj_auth", 密码, httponly=True, samesite="Strict", path="/", max_age=7天)`；`POST /api/logout` 清 cookie
+- `_web_check_auth`：优先校验 HttpOnly cookie `mpj_auth`，再兼容 `Authorization: Bearer` header（脚本/API 客户端）；与 `config.web.password` 比对
+- 前端不再存 `localStorage`、不再手动加 Bearer header（cookie 由浏览器自动携带）；API 401 时弹出登录框
+- 登录/登出端点**不能**被安全警告模式的中间件放行（警告模式本就该全拦截）
 
 ### 前端踩坑记录
 - `.hidden { display: none !important; }` **必须有 `!important`**（历史教训：`.login-overlay` 的 `display:flex` 会覆盖无 `!important` 的 `.hidden`，导致登录遮罩永显）

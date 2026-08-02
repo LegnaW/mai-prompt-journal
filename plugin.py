@@ -52,6 +52,9 @@ _ORGANIZE_DEFAULT_REQUIREMENT = "把上述重复的提示词笔记合并整理�
 # 受 allow_write 开关控制的写入类工具（只读模式下禁用）
 _WRITE_TOOL_NAMES = ["add_aidraw_notes", "modify_aidraw_note", "delete_aidraw_note"]
 
+# WebUI 登录 HttpOnly cookie 有效期（秒），7 天
+_WEBUI_SESSION_TTL = 7 * 24 * 3600
+
 # WebUI 绑定非回环地址且未设置密码时，所有请求返回的警告页
 _WEBUI_WARNING_HTML = """\
 <!DOCTYPE html>
@@ -1621,6 +1624,8 @@ class PromptJournalPlugin(MaiBotPlugin):
             app.middlewares.append(warning_middleware)
         else:
             app.router.add_get("/", self._web_index)
+            app.router.add_post("/api/login", self._web_login)
+            app.router.add_post("/api/logout", self._web_logout)
             app.router.add_get("/api/status", self._web_status)
             app.router.add_get("/api/notes", self._web_notes)
             app.router.add_get("/api/search", self._web_search)
@@ -1660,9 +1665,15 @@ class PromptJournalPlugin(MaiBotPlugin):
         return bind.strip().lower() in {"127.0.0.1", "localhost", "::1"}
 
     def _web_check_auth(self, request: Any) -> bool:
-        """检查 WebUI 请求的密码认证（仅接受 Authorization: Bearer）。"""
+        """检查 WebUI 请求的密码认证。
+
+        优先校验 HttpOnly cookie（浏览器登录），兼容 Authorization: Bearer（脚本/API 客户端）。
+        """
         password = str(self.config.web.password or "").strip()
         if not password:
+            return True
+        cookie_token = request.cookies.get("mpj_auth") or ""
+        if cookie_token and cookie_token == password:
             return True
         auth_header = request.headers.get("Authorization", "")
         token = auth_header.replace("Bearer ", "").strip()
@@ -1678,6 +1689,38 @@ class PromptJournalPlugin(MaiBotPlugin):
         else:
             html = "<html><body><h1>webui.html 未找到</h1></body></html>"
         return web.Response(text=html, content_type="text/html")
+
+    async def _web_login(self, request: Any) -> Any:
+        """校验密码并下发 HttpOnly 登录 cookie。"""
+        from aiohttp import web
+
+        if self._web_check_auth(request):
+            return web.json_response({"success": True})
+        body = await self._web_read_body(request)
+        password = str(body.get("password", "") or "").strip()
+        expected = str(self.config.web.password or "").strip()
+        if not expected:
+            return web.json_response({"success": True})
+        if password != expected:
+            return web.json_response({"error": "密码错误"}, status=401)
+        resp = web.json_response({"success": True})
+        resp.set_cookie(
+            "mpj_auth",
+            password,
+            max_age=_WEBUI_SESSION_TTL,
+            httponly=True,
+            samesite="Strict",
+            path="/",
+        )
+        return resp
+
+    async def _web_logout(self, request: Any) -> Any:
+        """清除 WebUI 登录 cookie。"""
+        from aiohttp import web
+
+        resp = web.json_response({"success": True})
+        resp.set_cookie("mpj_auth", "", max_age=0, httponly=True, samesite="Strict", path="/")
+        return resp
 
     async def _web_json_response(self, request: Any, data: Any) -> Any:
         from aiohttp import web
