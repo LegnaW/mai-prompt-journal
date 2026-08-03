@@ -19,7 +19,6 @@
   <div class="card">
     <div class="row">
       <input type="text" id="searchInput" placeholder="搜索关键词..." onkeydown="if(event.key==='Enter')doSearch()">
-      <input type="text" id="searchNegInput" placeholder="负面关键词（可选，排除）" onkeydown="if(event.key==='Enter')doSearch()">
       <select id="searchNotebook" class="notebook-select" data-all="1"><option value="default">default</option><option value="all">全部</option></select>
       <button class="btn" onclick="doSearch()">搜索</button>
       <button class="btn btn-outline" onclick="loadNotes()">浏览全部</button>
@@ -81,12 +80,9 @@ function showSearchResults() {
 
 function doSearch() {
   const q = document.getElementById('searchInput').value.trim();
-  const neg = document.getElementById('searchNegInput').value.trim();
   const nb = document.getElementById('searchNotebook').value;
   if (!q) return;
-  const url = `/api/search?q=${encodeURIComponent(q)}&notebook=${nb}&limit=20`
-    + (neg ? `&neg_q=${encodeURIComponent(neg)}` : '');
-  api('GET', url).then(data => {
+  api('GET', `/api/search?q=${encodeURIComponent(q)}&notebook=${nb}&limit=20`).then(data => {
     const div = document.getElementById('searchResults');
     if (!data.results || data.results.length === 0) { div.innerHTML = '<p style="color:#999;padding:8px">未找到相关笔记</p>'; showSearchResults(); return; }
     div.innerHTML = '<table><thead><tr><th>来源</th><th>英文</th><th>中文</th><th>备注</th><th>相似度</th><th>ID</th><th>操作</th></tr></thead><tbody>' +
