@@ -158,9 +158,45 @@ const NAV_ITEMS = [
 function injectNav(activeId) {
   const holder = document.getElementById('nav');
   if (!holder) return;
-  holder.innerHTML = '<nav class="topnav">' + NAV_ITEMS.map(item =>
+  const links = NAV_ITEMS.map(item =>
     `<a href="${item.href}" class="${item.id === activeId ? 'active' : ''}">${item.label}</a>`
-  ).join('') + '</nav>';
+  ).join('');
+  holder.innerHTML = `<nav class="topnav">
+    <div class="topnav-links">${links}</div>
+    <div class="topnav-right">
+      <button class="btn btn-outline" onclick="doRefresh()" title="重新发现笔记本">刷新</button>
+      <button class="btn btn-outline" onclick="doRebuild()" title="增量重建所有笔记本索引">重建索引</button>
+      <button class="btn btn-outline" onclick="doRebuildFull()" title="全量重构所有笔记本索引（换 embedding 模型后使用）">全量重构索引</button>
+    </div>
+  </nav>`;
+}
+
+// 全局导航右侧的索引操作按钮（所有页面可用）
+function doRefresh() {
+  api('POST', '/api/refresh').then(data => {
+    if (data.error) { alert(data.error); return; }
+    loadStatus();
+    // 首页的浏览列表若展开则同步刷新
+    const card = document.getElementById('notesCard');
+    if (card && !card.classList.contains('hidden') && typeof fetchNotes === 'function') fetchNotes();
+    alert('已刷新');
+  }).catch(() => {});
+}
+
+function doRebuild() {
+  if (!confirm('确认重建所有笔记本索引？可能需要一些时间。')) return;
+  api('POST', '/api/rebuild').then(data => {
+    if (data.error) { alert(data.error); return; }
+    pollTasks();
+  }).catch(() => {});
+}
+
+function doRebuildFull() {
+  if (!confirm('确认全量重构所有笔记本索引？将忽略缓存、全部重新计算向量（换 embedding 模型后使用），可能需要较长时间。')) return;
+  api('POST', '/api/rebuild', { force: true }).then(data => {
+    if (data.error) { alert(data.error); return; }
+    pollTasks();
+  }).catch(() => {});
 }
 
 // ============================================================

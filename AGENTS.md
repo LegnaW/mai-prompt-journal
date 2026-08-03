@@ -31,12 +31,12 @@
 |------|------|
 | `_manifest.json` | 插件元信息 + 能力声明 + 依赖声明 |
 | `plugin.py` | 全部业务逻辑（~3100 行） |
-| `web/index.html` | WebUI 首页（状态栏 + 搜索/浏览 + 添加 + 索引管理） |
+| `web/index.html` | WebUI 首页（状态栏 + 搜索/浏览 + 添加） |
 | `web/dedup.html` | WebUI 去重页 |
 | `web/organize.html` | WebUI 操作数据库页 |
 | `web/import.html` | WebUI txt 批量导入页 |
 | `web/notebooks.html` | WebUI 笔记本管理页（新建空白笔记本 / 删除笔记本） |
-| `web/app.js` | WebUI 共享逻辑（api/esc/登录/loadStatus/导航注入） |
+| `web/app.js` | WebUI 共享逻辑（api/esc/登录/loadStatus/导航注入 + 全局导航右侧的刷新/重建索引/全量重构索引按钮） |
 | `web/style.css` | WebUI 共享样式 |
 | `config.toml` | 运行时配置 |
 

@@ -10,14 +10,7 @@
 <div class="container">
   <div id="nav"></div>
 
-  <div class="row" style="justify-content: space-between; margin-bottom: 12px;">
-    <h1>麦麦的绘图笔记本</h1>
-    <div class="row">
-      <button class="btn btn-outline btn-sm" onclick="doRefresh()">刷新</button>
-      <button class="btn btn-outline btn-sm" onclick="doRebuild()">重建索引</button>
-      <button class="btn btn-outline btn-sm" onclick="doRebuildFull()">全量重构索引</button>
-    </div>
-  </div>
+  <h1>麦麦的绘图笔记本</h1>
 
   <div class="card">
     <div class="status-bar" id="statusBar">加载中...</div>
@@ -205,31 +198,6 @@ function doDelete(id, nb) {
     loadStatus();
     const visible = !document.getElementById('notesCard').classList.contains('hidden');
     if (visible) fetchNotes(); else doSearch();
-  }).catch(() => {});
-}
-
-function doRefresh() {
-  api('POST', '/api/refresh').then(data => {
-    loadStatus();
-    const notesVisible = !document.getElementById('notesCard').classList.contains('hidden');
-    if (notesVisible) fetchNotes();
-    alert('已刷新');
-  }).catch(() => {});
-}
-
-function doRebuild() {
-  if (!confirm('确认重建所有笔记本索引？可能需要一些时间。')) return;
-  api('POST', '/api/rebuild').then(data => {
-    if (data.error) { alert(data.error); return; }
-    pollTasks();
-  }).catch(() => {});
-}
-
-function doRebuildFull() {
-  if (!confirm('确认全量重构所有笔记本索引？将忽略缓存、全部重新计算向量（换 embedding 模型后使用），可能需要较长时间。')) return;
-  api('POST', '/api/rebuild', { force: true }).then(data => {
-    if (data.error) { alert(data.error); return; }
-    pollTasks();
   }).catch(() => {});
 }
 

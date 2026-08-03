@@ -1,7 +1,9 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: system-ui, -apple-system, sans-serif; background: #f0f2f5; color: #333; padding: 16px; }
 .container { max-width: 1000px; margin: 0 auto; }
-.topnav { display: flex; gap: 8px; margin-bottom: 16px; }
+.topnav { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.topnav-links { display: flex; gap: 8px; flex-wrap: wrap; }
+.topnav-right { display: flex; gap: 8px; flex-wrap: wrap; }
 .topnav a { text-decoration: none; color: #666; background: #fff; padding: 8px 18px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); font-size: 14px; }
 .topnav a:hover { color: #4f9afe; }
 .topnav a.active { color: #fff; background: #4f9afe; }
