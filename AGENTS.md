@@ -131,7 +131,8 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 ## 去重与 LLM 整理（WebUI 功能）
 
 ### 扫描
-- `GET /api/dedup/scan?notebook=&threshold=`：L2 归一化 → N×N 余弦相似度矩阵 → 贪心聚类（`_scan_duplicates`）。
+- `GET /api/dedup/scan?notebook=&threshold=`：L2 归一化 → 余弦相似度 → 贪心聚类（`_scan_duplicates`）。
+- **`_scan_duplicates` 分块计算相似度**：每块 `_DEDUP_SCAN_BLOCK=256` 行（`block = normalized[i0:i1] @ normalized.T`，`B×N` 用完即弃），内存峰值从一次性 `N×N` 降到 `B×N`，避免大笔记本扫描占满内存；只读右上三角 `j>i`（天然不含自身，无需 `fill_diagonal`），结果与一次性全矩阵计算完全一致（无符号差异，仅浮点舍入级误差）。N=5000 实测峰值 RSS ≈74MB。**后续改动别改回一次性 N×N 矩阵**。
 - 阈值范围 0.5~0.99（后端钳制 `max(0.5, min(0.99, ...))`），WebUI 滑块 min 同步为 0.5。
 
 ### 处理方式（`POST /api/dedup/resolve`）
@@ -298,6 +299,7 @@ schema = generate_plugin_config_schema(m.PromptJournalConfig)
 - 修改 JSONL 格式要同步迁移逻辑（`_migrate_legacy` 负责旧 `notes.jsonl` → `default.jsonl`）
 - 新增笔记本操作时，检查 `rewrite_all` / `append_entries` / `update_md5` 是否都调用了
 - 修改搜索、去重、重建逻辑时注意 `self._lock` 并发保护
+- **`_scan_duplicates` 必须保持分块计算**（`_DEDUP_SCAN_BLOCK`，B×N 用完即弃），不要改回一次性 N×N 矩阵——大笔记本会 OOM
 - **`[journal] allow_write`**：只读模式开关。`_apply_write_tools_state()` 用 `ctx.component.disable/enable_component(name, "tool", scope="global")` 控制 `_WRITE_TOOL_NAMES`（add/modify/delete）三个工具的启停；`on_load` 与 `on_config_update(scope="self")` 都会应用（WebUI 改配置即时生效）。manifest 需声明 `component.disable`/`component.enable`。只影响 LLM 工具，管理员 `/mpj` 命令与 WebUI 不受影响
 - **去重 resolve 不要改回"手工改向量"**：一律走"只写源文件 → `_rebuild_notebook` → `_scan_duplicates`"（见"去重与 LLM 整理"）
 - **LLM 生成走 `_direct_chat`，不要改回 `ctx.llm.generate`**；新增 `ctx.*` 调用记得同步 `_manifest.json` 能力声明（当前仅 `llm.embed` + `send.text`）

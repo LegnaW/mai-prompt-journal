@@ -55,6 +55,9 @@ _WRITE_TOOL_NAMES = ["add_aidraw_notes", "modify_aidraw_note", "delete_aidraw_no
 # WebUI 登录 HttpOnly cookie 有效期（秒），7 天
 _WEBUI_SESSION_TTL = 7 * 24 * 3600
 
+# WebUI 去重扫描相似度矩阵的分块大小（行）：内存峰值从 N×N 降到 块大小×N
+_DEDUP_SCAN_BLOCK = 256
+
 # WebUI 绑定非回环地址且未设置密码时，所有请求返回的警告页
 _WEBUI_WARNING_HTML = """\
 <!DOCTYPE html>
@@ -2378,41 +2381,49 @@ class PromptJournalPlugin(MaiBotPlugin):
     def _scan_duplicates(
         entries: list[dict[str, Any]], embeddings: np.ndarray, threshold: float
     ) -> list[dict[str, Any]]:
-        """按余弦相似度对条目做贪心聚类，返回重复组列表。"""
-        # L2 归一化后计算 N×N 相似度矩阵
+        """按余弦相似度对条目做贪心聚类，返回重复组列表。
+
+        相似度分块计算（每块 _DEDUP_SCAN_BLOCK 行，B×N 用完即弃），
+        内存峰值从 N×N 降到 B×N，大笔记本扫描不会一次性吃满内存；
+        只读右上三角 j>i（不含自身），结果与一次性全矩阵计算完全一致。
+        """
         emb_f32 = embeddings.astype(np.float32)
         norms = np.linalg.norm(emb_f32, axis=1, keepdims=True)
         normalized = emb_f32 / np.where(norms > 1e-8, norms, 1.0)
-        sim_matrix = normalized @ normalized.T
-        np.fill_diagonal(sim_matrix, 0.0)
+        n = normalized.shape[0]
 
-        # 贪心聚类：相似度 >= threshold 的条目归入同组
+        # 贪心聚类：相似度 >= threshold 的条目归入同组（逐块取行，不驻留全矩阵）
         visited: set[int] = set()
         groups: list[dict[str, Any]] = []
-        for i in range(len(entries)):
-            if i in visited:
-                continue
-            group_indices = [i]
-            for j in range(i + 1, len(entries)):
-                if j in visited:
+        for i0 in range(0, n, _DEDUP_SCAN_BLOCK):
+            i1 = min(i0 + _DEDUP_SCAN_BLOCK, n)
+            block = normalized[i0:i1] @ normalized.T
+            for i_local in range(i1 - i0):
+                i = i0 + i_local
+                if i in visited:
                     continue
-                if sim_matrix[i][j] >= threshold:
-                    group_indices.append(j)
-                    visited.add(j)
-            if len(group_indices) > 1:
-                visited.add(i)
-                group_entries = []
-                for idx in group_indices:
-                    e = entries[idx]
-                    group_entries.append(
-                        {
-                            "id": e["id"],
-                            "en": e["en"],
-                            "zh": e["zh"],
-                            "note": e["note"],
-                        }
-                    )
-                groups.append({"entries": group_entries})
+                row = block[i_local]
+                group_indices = [i]
+                for j in range(i + 1, n):
+                    if j in visited:
+                        continue
+                    if row[j] >= threshold:
+                        group_indices.append(j)
+                        visited.add(j)
+                if len(group_indices) > 1:
+                    visited.add(i)
+                    group_entries = []
+                    for idx in group_indices:
+                        e = entries[idx]
+                        group_entries.append(
+                            {
+                                "id": e["id"],
+                                "en": e["en"],
+                                "zh": e["zh"],
+                                "note": e["note"],
+                            }
+                        )
+                    groups.append({"entries": group_entries})
 
         return groups
 
