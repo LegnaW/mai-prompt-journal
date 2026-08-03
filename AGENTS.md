@@ -132,7 +132,7 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 
 ### 扫描
 - `GET /api/dedup/scan?notebook=&threshold=`：L2 归一化 → 余弦相似度 → 贪心聚类（`_scan_duplicates`）。
-- **`_scan_duplicates` 分块计算相似度**：每块 `_DEDUP_SCAN_BLOCK=256` 行（`block = normalized[i0:i1] @ normalized.T`，`B×N` 用完即弃），内存峰值从一次性 `N×N` 降到 `B×N`，避免大笔记本扫描占满内存；只读右上三角 `j>i`（天然不含自身，无需 `fill_diagonal`），结果与一次性全矩阵计算完全一致（无符号差异，仅浮点舍入级误差）。N=5000 实测峰值 RSS ≈74MB。**后续改动别改回一次性 N×N 矩阵**。
+- **`_scan_duplicates` 分块计算相似度**：每块 `[journal].dedup_scan_block`（默认 `_DEDUP_SCAN_BLOCK=256`）行（`block = normalized[i0:i1] @ normalized.T`，`B×N` 用完即弃），内存峰值从一次性 `N×N` 降到 `B×N`，避免大笔记本扫描占满内存；只读右上三角 `j>i`（天然不含自身，无需 `fill_diagonal`），结果与一次性全矩阵计算完全一致（无符号差异，仅浮点舍入级误差）。N=5000 实测峰值 RSS ≈74MB。分块大小可在插件配置页 `[journal]` 的「去重扫描分块大小」修改（一般不需要动）。**后续改动别改回一次性 N×N 矩阵**。
 - 阈值范围 0.5~0.99（后端钳制 `max(0.5, min(0.99, ...))`），WebUI 滑块 min 同步为 0.5。
 
 ### 处理方式（`POST /api/dedup/resolve`）

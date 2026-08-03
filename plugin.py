@@ -258,6 +258,17 @@ class JournalConfig(PluginConfigBase):
             "order": 6,
         },
     )
+    dedup_scan_block: int = Field(
+        default=_DEDUP_SCAN_BLOCK,
+        ge=16,
+        le=4096,
+        description="去重扫描相似度矩阵计算的分块行数",
+        json_schema_extra={
+            "label": "去重扫描分块大小",
+            "hint": "去重扫描相似度计算的分块行数，影响内存占用（越小越省内存），一般不需要修改",
+            "order": 7,
+        },
+    )
 
 
 class AdminConfig(PluginConfigBase):
@@ -2377,16 +2388,19 @@ class PromptJournalPlugin(MaiBotPlugin):
         groups = self._scan_duplicates(entries, embeddings, threshold)
         return web.json_response({"notebook": nb_name, "threshold": threshold, "groups": groups, "total": len(groups)})
 
-    @staticmethod
     def _scan_duplicates(
+        self,
         entries: list[dict[str, Any]], embeddings: np.ndarray, threshold: float
     ) -> list[dict[str, Any]]:
         """按余弦相似度对条目做贪心聚类，返回重复组列表。
 
-        相似度分块计算（每块 _DEDUP_SCAN_BLOCK 行，B×N 用完即弃），
+        相似度分块计算（每块 [journal].dedup_scan_block 行，B×N 用完即弃），
         内存峰值从 N×N 降到 B×N，大笔记本扫描不会一次性吃满内存；
         只读右上三角 j>i（不含自身），结果与一次性全矩阵计算完全一致。
         """
+        block = int(getattr(self.config.journal, "dedup_scan_block", 0) or _DEDUP_SCAN_BLOCK)
+        block = max(16, min(4096, block))
+
         emb_f32 = embeddings.astype(np.float32)
         norms = np.linalg.norm(emb_f32, axis=1, keepdims=True)
         normalized = emb_f32 / np.where(norms > 1e-8, norms, 1.0)
@@ -2395,14 +2409,14 @@ class PromptJournalPlugin(MaiBotPlugin):
         # 贪心聚类：相似度 >= threshold 的条目归入同组（逐块取行，不驻留全矩阵）
         visited: set[int] = set()
         groups: list[dict[str, Any]] = []
-        for i0 in range(0, n, _DEDUP_SCAN_BLOCK):
-            i1 = min(i0 + _DEDUP_SCAN_BLOCK, n)
-            block = normalized[i0:i1] @ normalized.T
+        for i0 in range(0, n, block):
+            i1 = min(i0 + block, n)
+            block_matrix = normalized[i0:i1] @ normalized.T
             for i_local in range(i1 - i0):
                 i = i0 + i_local
                 if i in visited:
                     continue
-                row = block[i_local]
+                row = block_matrix[i_local]
                 group_indices = [i]
                 for j in range(i + 1, n):
                     if j in visited:
