@@ -55,8 +55,6 @@ _WRITE_TOOL_NAMES = ["add_aidraw_notes", "modify_aidraw_note", "delete_aidraw_no
 # WebUI 登录 HttpOnly cookie 有效期（秒），7 天
 _WEBUI_SESSION_TTL = 7 * 24 * 3600
 
-# 负面搜索：负面强度对最终分的扣分权重（0~1，满负面扣 0.5）
-_NEG_PENALTY_WEIGHT = 0.5
 # _compute_text_boost 的最大可能值，用于把负面文本匹配强度归一化到 0~1
 _POS_TEXT_BOOST_MAX = 0.30
 
@@ -272,6 +270,18 @@ class JournalConfig(PluginConfigBase):
             "label": "去重扫描分块大小",
             "hint": "去重扫描相似度计算的分块行数，影响内存占用（越小越省内存），一般不需要修改",
             "order": 7,
+        },
+    )
+    neg_penalty_weight: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="负面搜索扣分权重",
+        json_schema_extra={
+            "label": "负面搜索扣分权重",
+            "hint": "负面搜索时负面强度对最终分的扣分权重（0~1，越大负面排除效果越强；默认 0.5）",
+            "order": 8,
+            "x-widget": "number",
         },
     )
 
@@ -3657,7 +3667,7 @@ class PromptJournalPlugin(MaiBotPlugin):
         1. 向量搜索取候选（放宽阈值，扩大候选池；仅由正面 base 分决定）
         2. 对候选用 query 做本地文本匹配加分
         3. 若提供负面搜索（neg_query_text / neg_vec），对每个候选计算负面强度并扣分：
-           neg_strength = max(向量余弦, 文本匹配/0.30)，final = pos - _NEG_PENALTY_WEIGHT * neg_strength
+           neg_strength = max(向量余弦, 文本匹配/0.30)，final = pos - config.journal.neg_penalty_weight * neg_strength
         4. 应用原始阈值 → 排序 → 取 top_k
 
         负面不扩大候选池，只影响最终排序与过滤；neg_vec 为 None 时完全走旧逻辑。
@@ -3707,7 +3717,7 @@ class PromptJournalPlugin(MaiBotPlugin):
                 # 负面强度 = 语义向量相似度 与 文本匹配强度 取较大者
                 neg_text_strength = self._compute_text_boost(neg_lower, en_lower, zh_lower) / _POS_TEXT_BOOST_MAX
                 neg_strength = max(float(neg_sims[i]) if neg_sims is not None else 0.0, neg_text_strength)
-                final_score -= _NEG_PENALTY_WEIGHT * neg_strength
+                final_score -= float(self.config.journal.neg_penalty_weight) * neg_strength
 
             if final_score >= min_score:
                 scored.append((i, final_score))
