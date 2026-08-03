@@ -32,9 +32,6 @@
         <div id="importDropFileName" style="font-size:13px;color:#888;margin-top:8px;">支持 .txt 文本文件</div>
         <input type="file" id="importFile" accept=".txt" style="display:none;" onchange="importFileSelected()">
       </div>
-      <div class="row" style="margin-top:8px;">
-        <button class="btn" id="importPreviewBtn" onclick="doPreviewImport()">解析预览</button>
-      </div>
     </div>
   </div>
 
@@ -230,7 +227,6 @@ function doStartImport() {
 
 function setImportDisabled(disabled) {
   const zone = document.getElementById('importDropZone');
-  const previewBtn = document.getElementById('importPreviewBtn');
   const radios = document.querySelectorAll('input[name="importMode"]');
   const ta = document.getElementById('importCustomPrompt');
   const refs = document.querySelectorAll('.import-ref-cb');
@@ -240,7 +236,6 @@ function setImportDisabled(disabled) {
     zone.style.cursor = 'not-allowed';
     zone.style.background = '#f0f0f0';
     zone.style.borderColor = '#ccc';
-    previewBtn.disabled = true;
     radios.forEach(r => r.disabled = true);
     ta.disabled = true;
     refs.forEach(r => r.disabled = true);
@@ -250,7 +245,6 @@ function setImportDisabled(disabled) {
     zone.style.cursor = 'pointer';
     zone.style.background = '#f5f9ff';
     zone.style.borderColor = '#4f9afe';
-    previewBtn.disabled = false;
     radios.forEach(r => r.disabled = false);
     refs.forEach(r => r.disabled = false);
     startBtn.disabled = false;

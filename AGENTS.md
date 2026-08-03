@@ -183,7 +183,7 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 - **错误透传**：`_run_organize_db_round` 返回 `(plan, messages, error)`，`_organize_db_plan` 失败返回 `{"_error":"llm","message":具体错误}`（含 `_direct_chat` 的 HTTP 详情），任务把具体错误放进 status，前端 `data.error` 直接展示（不再只显示"操作失败"）。
 - **模式（学习描述方式/导入人物形象/提取动作模板/无附加提示词）是纯前端**：`web/organize.html` 单选 `organizeDbMode`（默认 `none`），`doOrganizeDbPlan` 按模式把常量 `ORGANIZE_DB_MODE_PROMPTS` 前置拼进 `requirement` 提交（后端无 mode 字段）；只影响首轮，补充轮不附加。输入框上方有 `updateOrganizeDbModePrompt()` 驱动的只读展示区，实时显示当前模式附加的提示词全文（`none` 显示"无"）。
 - `POST /api/organize_db/apply` 成功后清除对应 `session_id` 会话。
-- 前端对话框内：方案预览 + [补充要求输入框 + 追加要求] + [确认执行] + [清除]，每轮刷新只显示最新方案。
+- 前端对话框内：方案预览（每条操作独立元素 + 复选框默认全选，按类型配色：新增浅绿/修改浅蓝/删除浅红）+ [补充要求输入框 + 追加要求] + [执行已选] + [全选/全不选] + [清除]，每轮刷新只显示最新方案。`renderOrganizeDbPlan` 用 `data-idx` 记录操作索引，`doOrganizeDbApply` 只提交勾选的 operations 子集。
 
 ## txt 批量导入（WebUI 功能）
 

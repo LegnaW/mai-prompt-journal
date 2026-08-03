@@ -160,23 +160,32 @@ function renderOrganizeDbPlan(data) {
   if (ops.length === 0) {
     lines += '<div style="margin-top:6px;color:#2e7d32">方案为空：无需修改</div>';
   } else {
-    lines += `<div style="margin-top:6px;"><strong>共 ${ops.length} 条操作：</strong></div>`;
+    lines += `<div style="margin-top:6px;"><strong>共 ${ops.length} 条操作（勾选要执行的部分）：</strong></div>`;
     ops.forEach((op, i) => {
+      let bg, color, text;
       if (op.type === 'create') {
-        lines += `<div style="margin-top:4px;color:#2e7d32">${i+1}. 新建: ${esc(op.en)} / ${esc(op.zh)}${op.note ? ' — ' + esc(op.note) : ''}</div>`;
+        bg = '#e8f5e9'; color = '#2e7d32';
+        text = `新建: ${esc(op.en)} / ${esc(op.zh)}${op.note ? ' — ' + esc(op.note) : ''}`;
       } else if (op.type === 'update') {
+        bg = '#e3f2fd'; color = '#1565c0';
         const old = op._old || {};
         const fields = [];
         if (op.en !== undefined) fields.push(`en: ${esc(old.en||'')} → ${esc(op.en)}`);
         if (op.zh !== undefined) fields.push(`zh: ${esc(old.zh||'')} → ${esc(op.zh)}`);
         if (op.note !== undefined) fields.push(`note: ${esc(old.note||'')} → ${esc(op.note)}`);
-        lines += `<div style="margin-top:4px;color:#1565c0">${i+1}. 修改 ${esc(op.id)}: ${fields.join('；')}</div>`;
+        text = `修改 ${esc(op.id)}: ${fields.join('；')}`;
       } else if (op.type === 'delete') {
+        bg = '#fdecea'; color = '#c62828';
         const old = op._old || {};
-        lines += `<div style="margin-top:4px;color:#c62828">${i+1}. 删除 ${esc(op.id)}（${esc(old.en||'')} / ${esc(old.zh||'')}）</div>`;
+        text = `删除 ${esc(op.id)}（${esc(old.en||'')} / ${esc(old.zh||'')}）`;
       } else {
-        lines += `<div style="margin-top:4px;color:#999">${i+1}. ${esc(op.type)}</div>`;
+        bg = '#f5f5f5'; color = '#999';
+        text = esc(op.type);
       }
+      lines += `<div style="margin-top:4px;padding:8px 10px;border-radius:6px;background:${bg};display:flex;align-items:center;">
+        <input type="checkbox" class="op-cb" data-idx="${i}" checked style="flex:0 0 auto;cursor:pointer;">
+        <span style="flex:1;margin-left:8px;color:${color};">${text}</span>
+      </div>`;
     });
   }
   lines += `<div class="row" style="margin-top:10px;align-items:stretch;">
@@ -184,10 +193,16 @@ function renderOrganizeDbPlan(data) {
     <button class="btn btn-sm btn-outline" onclick="doOrganizeDbAppend()">追加要求</button>
   </div>`;
   lines += `<div class="row" style="margin-top:8px;">
-    <button class="btn btn-sm btn-success" onclick="doOrganizeDbApply()">确认执行</button>
+    <button class="btn btn-sm btn-success" onclick="doOrganizeDbApply()">执行已选</button>
+    <button class="btn btn-sm btn-outline" onclick="selectAllOps(true)">全选</button>
+    <button class="btn btn-sm btn-outline" onclick="selectAllOps(false)">全不选</button>
     <button class="btn btn-sm btn-outline" onclick="clearOrganizeDb()">清除</button>
   </div></div>`;
   return lines;
+}
+
+function selectAllOps(check) {
+  document.querySelectorAll('.op-cb').forEach(cb => cb.checked = check);
 }
 
 function clearOrganizeDb() {
@@ -201,11 +216,15 @@ function doOrganizeDbApply() {
   if (!organizeDbPlan) { alert('请先生成操作方案'); return; }
   const ops = organizeDbPlan.operations || [];
   if (ops.length === 0) { alert('方案为空，无需执行'); return; }
+  const selected = Array.from(document.querySelectorAll('.op-cb:checked'))
+    .map(cb => ops[parseInt(cb.dataset.idx)])
+    .filter(Boolean);
+  if (selected.length === 0) { alert('请先勾选要执行的操作'); return; }
   const nb = document.getElementById('organizeDbNotebook').value;
-  if (!confirm(`确认执行 ${ops.length} 条操作？执行后索引将重建。`)) return;
+  if (!confirm(`确认执行选中的 ${selected.length} 条操作？执行后索引将重建。`)) return;
   api('POST', '/api/organize_db/apply', {
     notebook: nb,
-    operations: ops,
+    operations: selected,
     session_id: organizeDbSessionId || undefined,
   }).then(data => {
     if (data.error) { alert(data.error); return; }
