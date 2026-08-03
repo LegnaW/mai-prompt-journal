@@ -279,7 +279,7 @@ class DedupMergeConfig(PluginConfigBase):
         json_schema_extra={"label": "启用 LLM 整理", "hint": "是否在去重扫描中启用 LLM 整理功能", "order": 0},
     )
     system_prompt: str = Field(
-        default="",
+        default=_DEDUP_MERGE_DEFAULT_SYSTEM_PROMPT,
         description="整理系统提示词，留空用内置默认",
         json_schema_extra={
             "label": "整理系统提示词",
@@ -318,7 +318,7 @@ class OrganizeDbConfig(PluginConfigBase):
         json_schema_extra={"label": "search_notes 返回条数", "hint": "LLM 调用 search_notes 工具时单次返回的笔记条数", "order": 2, "x-widget": "number"},
     )
     system_prompt: str = Field(
-        default="",
+        default=_ORGANIZE_DB_DEFAULT_SYSTEM_PROMPT,
         description="操作数据库系统提示词，留空用内置默认",
         json_schema_extra={
             "label": "操作数据库系统提示词",

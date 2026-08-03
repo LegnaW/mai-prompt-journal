@@ -139,14 +139,18 @@ textarea::placeholder { color: #bbb; }
     <div style="margin-bottom: 12px;">
       <div class="row" style="margin-bottom: 4px;">
         <label>模式:</label>
-        <label><input type="radio" name="organizeDbMode" value="write"> 写入笔记</label>
-        <label><input type="radio" name="organizeDbMode" value="organize" checked> 整理笔记</label>
+        <label><input type="radio" name="organizeDbMode" value="learn_style" onchange="updateOrganizeDbModePrompt()"> 学习描述方式</label>
+        <label><input type="radio" name="organizeDbMode" value="import_character" onchange="updateOrganizeDbModePrompt()"> 导入人物形象</label>
+        <label><input type="radio" name="organizeDbMode" value="action_template" onchange="updateOrganizeDbModePrompt()"> 提取动作模板</label>
+        <label><input type="radio" name="organizeDbMode" value="none" checked onchange="updateOrganizeDbModePrompt()"> 无附加提示词</label>
       </div>
-      <div style="font-size:12px;color:#999;">选项将影响请求提示词：选择"写入笔记"时输入你想要学习的提示词全文；选择"整理笔记"时输入你的整理要求。每次点击"生成操作方案"都会新建对话。</div>
+      <div style="font-size:12px;color:#999;">选项将影响请求提示词：选择"学习描述方式"时输入你想要学习的提示词全文；选择"导入人物形象"时输入角色名称与形象设定；选择"提取动作模板"时输入完整的提示词；选择"无附加提示词"时直接输入操作要求。每次点击"生成操作方案"都会新建对话。</div>
     </div>
     <div style="margin-bottom: 12px;">
+      <label style="display:block; margin-bottom:4px;">附加提示词:</label>
+      <div id="organizeDbModePromptDisplay" style="font-size:12px;color:#555;background:#f5f5f5;border:1px solid #eee;border-radius:4px;padding:6px 8px;margin-bottom:8px;white-space:pre-wrap;word-break:break-all;">附加提示词: 无</div>
       <label style="display:block; margin-bottom:4px;">操作要求（随请求提交给 AI）:</label>
-      <textarea id="organizeDbRequirement" rows="2" placeholder="写入笔记：粘贴你想学习的提示词全文；整理笔记：填写整理要求"></textarea>
+      <textarea id="organizeDbRequirement" rows="2" placeholder="根据所选模式填写：学习描述方式=提示词全文；导入人物形象=角色名称与设定；提取动作模板=完整提示词；无附加提示词=直接填写操作要求"></textarea>
     </div>
     <div id="organizeDbResult"></div>
     </div>
@@ -511,20 +515,31 @@ let organizeDbSessionId = null;
 let organizeDbTaskId = null;
 
 const ORGANIZE_DB_MODE_PROMPTS = {
-  write: '阅读以下提示词，找出有学习价值且没有与已知数据库重复的提示词片段。应优先记录有意义的 tag 组合或搭配（如形象设计、表情动作、背景、氛围、服装与配饰等彼此搭配形成的完整特征，一般由 3~6 个 tag 构成），不要只记录孤立、通用的单一 tag——单独一个常见 tag 通常缺乏学习价值且容易与已有条目重复。若关键描述片段本身是用自然语言写成的，也可以直接以这段自然语言进行记录。对每个片段在note中简要总结其作用并给出使用场景。',
-  organize: '请按照以下要求整理笔记。',
+  learn_style: '阅读以下提示词，找出有学习价值且没有与已知数据库重复的提示词片段。应优先记录有意义的 tag 组合或搭配（如形象设计、表情动作、背景、氛围、服装与配饰等彼此搭配形成的完整特征，一般由 3~6 个 tag 构成），不要只记录孤立、通用的单一 tag——单独一个常见 tag 通常缺乏学习价值且容易与已有条目重复。若关键描述片段本身是用自然语言写成的，也可以直接以这段自然语言进行记录。对每个片段在note中简要总结其作用并给出使用场景。',
+  import_character: '以下为某个自定义角色形象的名称和形象设定，若笔记本内不存在这名角色的设定信息，则将其整理为1条笔记，在备注中写明人物名称。若存在重复，则更新已有的笔记。',
+  action_template: '以下为一组完整的提示词，请去除其中的所有角色形象描述（包括发型发色、外观面貌、服装饰品等等），仅保留动作描述，整理为1条笔记，在备注中除内容简要总结/使用场景外，还要额外备注"此为动作模板，无形象描述，需添加后使用"。',
+  none: '',
 };
 
 function getOrganizeDbMode() {
   const el = document.querySelector('input[name="organizeDbMode"]:checked');
-  return el ? el.value : 'organize';
+  return el ? el.value : 'none';
+}
+
+function updateOrganizeDbModePrompt() {
+  const mode = getOrganizeDbMode();
+  const prompt = ORGANIZE_DB_MODE_PROMPTS[mode] || '';
+  const display = document.getElementById('organizeDbModePromptDisplay');
+  if (display) {
+    display.textContent = '附加提示词: ' + (prompt || '无');
+  }
 }
 
 function doOrganizeDbPlan() {
   const nb = document.getElementById('organizeDbNotebook').value;
   const mode = getOrganizeDbMode();
   const userReq = document.getElementById('organizeDbRequirement').value.trim();
-  const modePrompt = ORGANIZE_DB_MODE_PROMPTS[mode] || ORGANIZE_DB_MODE_PROMPTS.organize;
+  const modePrompt = ORGANIZE_DB_MODE_PROMPTS[mode] || '';
   const requirement = (modePrompt + (userReq ? '\n\n' + userReq : '')).trim();
   const div = document.getElementById('organizeDbResult');
   div.innerHTML = '<p style="color:#999">LLM 正在思考中...</p>';
@@ -657,6 +672,7 @@ function doOrganizeDbApply() {
   }).catch(() => {});
 }
 
+updateOrganizeDbModePrompt();
 loadStatus();
 </script>
 </body>
