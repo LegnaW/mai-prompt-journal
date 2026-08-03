@@ -305,6 +305,7 @@ schema = generate_plugin_config_schema(m.PromptJournalConfig)
 - 修改 JSONL 格式要同步迁移逻辑（`_migrate_legacy` 负责旧 `notes.jsonl` → `default.jsonl`）
 - 新增笔记本操作时，检查 `rewrite_all` / `append_entries` / `update_md5` 是否都调用了
 - 修改搜索、去重、重建逻辑时注意 `self._lock` 并发保护
+- **笔记 tag 组合数量（3~10）出现在三处，改动必须同步**：`add_aidraw_notes` 工具描述（`plugin.py`）、`web/organize.html` 与 `web/import.html` 的 `learn_style` 预设
 - **`_scan_duplicates` 必须保持分块计算**（`_DEDUP_SCAN_BLOCK`，B×N 用完即弃），不要改回一次性 N×N 矩阵——大笔记本会 OOM
 - **`[journal] allow_write`**：只读模式开关。`_apply_write_tools_state()` 用 `ctx.component.disable/enable_component(name, "tool", scope="global")` 控制 `_WRITE_TOOL_NAMES`（add/modify/delete）三个工具的启停；`on_load` 与 `on_config_update(scope="self")` 都会应用（WebUI 改配置即时生效）。manifest 需声明 `component.disable`/`component.enable`。只影响 LLM 工具，管理员 `/mpj` 命令与 WebUI 不受影响
 - **去重 resolve 不要改回"手工改向量"**：一律走"只写源文件 → `_rebuild_notebook` → `_scan_duplicates`"（见"去重与 LLM 整理"）
