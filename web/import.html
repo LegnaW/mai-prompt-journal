@@ -43,8 +43,9 @@
       <div class="row" style="margin-bottom: 4px;">
         <label>模式:</label>
         <label><input type="radio" name="importMode" value="learn_style" onchange="syncImportModePrompt()"> 学习描述方式</label>
-        <label><input type="radio" name="importMode" value="import_character" onchange="syncImportModePrompt()"> 导入人物形象</label>
+        <label><input type="radio" name="importMode" value="import_character" onchange="syncImportModePrompt()"> 导入oc设计</label>
         <label><input type="radio" name="importMode" value="action_template" onchange="syncImportModePrompt()"> 提取动作模板</label>
+        <label><input type="radio" name="importMode" value="outfit_template" onchange="syncImportModePrompt()"> 提取服饰穿搭</label>
         <label><input type="radio" name="importMode" value="custom" checked onchange="syncImportModePrompt()"> 自定义</label>
       </div>
       <div style="font-size:12px;color:#999;">选择预设模式时附加提示词自动锁定为对应预设，无法修改；选择"自定义"时可编辑。附加提示词将作用于整次导入的所有段落。</div>
@@ -92,6 +93,7 @@ const IMPORT_MODE_PROMPTS = {
   learn_style: '阅读以下提示词，找出有学习价值且没有与已知数据库重复的提示词片段。应优先记录有意义的 tag 组合或搭配（如形象设计、表情动作、背景、氛围、服装与配饰等彼此搭配形成的完整特征，一般由 3~10 个 tag 构成），不要只记录孤立、通用的单一 tag——单独一个常见 tag 通常缺乏学习价值且容易与已有条目重复。若关键描述片段本身是用自然语言写成的，也可以直接以这段自然语言进行记录。对每个片段在note中简要总结其作用并给出使用场景。',
   import_character: '以下为某个自定义角色形象的名称和形象设定，若笔记本内不存在这名角色的设定信息，则将其整理为1条笔记，在备注中写明人物名称。若存在重复，则更新已有的笔记。',
   action_template: '以下为一组完整的提示词，请去除其中的所有角色形象描述（包括发型发色、外观面貌、服装饰品等等），仅保留动作描述，整理为1条笔记，在备注中除内容简要总结/使用场景外，还要额外备注"此为动作模板，无形象描述，需添加后使用"。注意，不要在备注中写明你删除了什么内容。',
+  outfit_template: '以下为一组完整的提示词，请分析并提取提示词中每一个人物的服饰穿搭，包括服装、饰品、附加物品（如包包等），分别整理为N条笔记（N为提示词中人物数量，若未明确说明则视为1），在备注中除内容简要总结/使用场景外，还要额外备注"服饰穿搭模板"。注意，不要在备注中写明你删除了什么内容。',
 };
 
 function getImportMode() {

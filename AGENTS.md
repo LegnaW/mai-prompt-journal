@@ -182,7 +182,7 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
   - 无 `session_id` → 新建会话跑初始轮；有 → 校验会话/notebook/非空补充后追加 user 消息重跑**覆盖**上一轮
   - `session_id` 不存在/不匹配 → error"会话已过期"；补充要求为空 → error"补充要求不能为空"
 - **错误透传**：`_run_organize_db_round` 返回 `(plan, messages, error)`，`_organize_db_plan` 失败返回 `{"_error":"llm","message":具体错误}`（含 `_direct_chat` 的 HTTP 详情），任务把具体错误放进 status，前端 `data.error` 直接展示（不再只显示"操作失败"）。
-- **模式（学习描述方式/导入人物形象/提取动作模板/无附加提示词）是纯前端**：`web/organize.html` 单选 `organizeDbMode`（默认 `none`），`doOrganizeDbPlan` 按模式把常量 `ORGANIZE_DB_MODE_PROMPTS` 前置拼进 `requirement` 提交（后端无 mode 字段）；只影响首轮，补充轮不附加。输入框上方有 `updateOrganizeDbModePrompt()` 驱动的只读展示区，实时显示当前模式附加的提示词全文（`none` 显示"无"）。
+- **模式（学习描述方式/导入oc设计/提取动作模板/提取服饰穿搭/无附加提示词）是纯前端**：`web/organize.html` 单选 `organizeDbMode`（默认 `none`），`doOrganizeDbPlan` 按模式把常量 `ORGANIZE_DB_MODE_PROMPTS` 前置拼进 `requirement` 提交（后端无 mode 字段）；只影响首轮，补充轮不附加。输入框上方有 `updateOrganizeDbModePrompt()` 驱动的只读展示区，实时显示当前模式附加的提示词全文（`none` 显示"无"）。
 - `POST /api/organize_db/apply` 成功后清除对应 `session_id` 会话。
 - 前端对话框内：方案预览（每条操作独立元素 + 复选框默认全选，按类型配色：新增浅绿/修改浅蓝/删除浅红）+ [补充要求输入框 + 追加要求] + [执行已选] + [全选/全不选] + [清除]，每轮刷新只显示最新方案。`renderOrganizeDbPlan` 用 `data-idx` 记录操作索引，`doOrganizeDbApply` 只提交勾选的 operations 子集。
 
@@ -193,7 +193,7 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 - **切分**：`_split_txt`（模块级函数）按两个及以上连续换行（`\n{2,}`）切分，段首尾 strip，忽略空段，单段也能导入。
 - **临时笔记本**：固定名 `tmp`，文件在 `data_dir/tmp_import/`（`tmp.jsonl` / `tmp.cache.jsonl` / `tmp.embeddings.npy` / `tmp.index.meta` / `import.log`），用 `Notebook("tmp", data_dir, custom_dir=tmp_import_dir)` 构造，**不参与** `_discover_notebooks`（但 `_get_notebook("tmp")` 返回它，供 `/api/modify`、`/api/delete` 编辑临时条目）。一轮完成后**不清理**；下一轮导入开始前 `_reset_tmp_import()` 清空。
 - **一段一完整循环**：`_run_import_segment` 对每段独立跑 agent 循环（多轮 search_notes），搜索范围 = 用户选择的引用笔记本 + 临时笔记本（`_execute_search_notes_multi`）；系统提示词 = `organize_db.system_prompt` + `\n` + `batch_import_prompt`（`{temp-journal}` 替换为 `tmp`，约束 LLM 只能改临时笔记本）；输出完整 create/update/delete，`_apply_ops_to_tmp` 应用后 `_rebuild_notebook(tmp)` 增量重建，下一段可见。
-- **模式（附加提示词）是纯前端**：`web/import.html` 四模式单选（学习描述方式/导入人物形象/提取动作模板/自定义），预设直接发对应 `IMPORT_MODE_PROMPTS` 文本，自定义弹窗输入；`POST /api/import/start` 的 `mode_prompt` 字段后端仅校验非空（双重校验）。
+- **模式（附加提示词）是纯前端**：`web/import.html` 五模式单选（学习描述方式/导入oc设计/提取动作模板/提取服饰穿搭/自定义），预设直接发对应 `IMPORT_MODE_PROMPTS` 文本，自定义弹窗输入；`POST /api/import/start` 的 `mode_prompt` 字段后端仅校验非空（双重校验）。
 - **失败处理**：某段 LLM 调用/解析/写入失败 → 跳过该段，记录到 result.failed，继续下一段；导入完成后把失败汇总追加到 `import.log` 末尾。
 - **日志**：`import.log` 记录每段时间、用户输入、附加提示词、LLM 决定与理由（reason + operations）、成功/失败。
 - **处置**（`POST /api/import/resolve`）：`merge` 合并入已有笔记本（复用 tmp 向量直接追加）、`create` 新建笔记本（复制 tmp 四文件到 `imports/{new_name}.jsonl`，`_discover_notebooks` 自动发现）、`discard` 丢弃（仅清空状态，文件留给下一轮清理）。
