@@ -1463,7 +1463,7 @@ class PromptJournalPlugin(MaiBotPlugin):
     @Command(
         "mpj_add",
         description="添加绘图笔记",
-        pattern=r"^/mpj\s+add\s+(.+)$",
+        pattern=r"^/mpj\s+add\s+(?P<content>.+)$",
     )
     async def handle_cmd_add(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, bool]:
         user_id = str(kwargs.get("user_id", "") or "").strip()
@@ -1471,7 +1471,7 @@ class PromptJournalPlugin(MaiBotPlugin):
             return True, "", False
 
         matched_groups = kwargs.get("matched_groups", {})
-        raw = str(matched_groups.get(1, "") or "").strip()
+        raw = str(matched_groups.get("content", "") or "").strip()
         if not raw:
             await self.ctx.send.text("用法: /mpj add 英文|中文[|备注] [-n 笔记本]", stream_id)
             return True, "", True
@@ -1544,7 +1544,7 @@ class PromptJournalPlugin(MaiBotPlugin):
     @Command(
         "mpj_search",
         description="搜索绘图笔记",
-        pattern=r"^/mpj\s+search\s+(.+)$",
+        pattern=r"^/mpj\s+search\s+(?P<query>.+)$",
     )
     async def handle_cmd_search(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, bool]:
         user_id = str(kwargs.get("user_id", "") or "").strip()
@@ -1552,7 +1552,7 @@ class PromptJournalPlugin(MaiBotPlugin):
             return True, "", False
 
         matched_groups = kwargs.get("matched_groups", {})
-        raw = str(matched_groups.get(1, "") or "").strip()
+        raw = str(matched_groups.get("query", "") or "").strip()
         if not raw:
             await self.ctx.send.text("用法: /mpj search 关键词 [-n 笔记本或all]", stream_id)
             return True, "", True
@@ -1601,7 +1601,7 @@ class PromptJournalPlugin(MaiBotPlugin):
     @Command(
         "mpj_modify",
         description="修改绘图笔记",
-        pattern=r"^/mpj\s+modify\s+(.+)$",
+        pattern=r"^/mpj\s+modify\s+(?P<content>.+)$",
     )
     async def handle_cmd_modify(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, bool]:
         user_id = str(kwargs.get("user_id", "") or "").strip()
@@ -1609,7 +1609,7 @@ class PromptJournalPlugin(MaiBotPlugin):
             return True, "", False
 
         matched_groups = kwargs.get("matched_groups", {})
-        raw = str(matched_groups.get(1, "") or "").strip()
+        raw = str(matched_groups.get("content", "") or "").strip()
         if not raw:
             await self.ctx.send.text("用法: /mpj modify ID 字段=值 [...] [-n 笔记本]", stream_id)
             return True, "", True
@@ -1710,7 +1710,7 @@ class PromptJournalPlugin(MaiBotPlugin):
     @Command(
         "mpj_delete",
         description="删除绘图笔记",
-        pattern=r"^/mpj\s+delete\s+(.+)$",
+        pattern=r"^/mpj\s+delete\s+(?P<content>.+)$",
     )
     async def handle_cmd_delete(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, bool]:
         user_id = str(kwargs.get("user_id", "") or "").strip()
@@ -1718,7 +1718,7 @@ class PromptJournalPlugin(MaiBotPlugin):
             return True, "", False
 
         matched_groups = kwargs.get("matched_groups", {})
-        raw = str(matched_groups.get(1, "") or "").strip()
+        raw = str(matched_groups.get("content", "") or "").strip()
         if not raw:
             await self.ctx.send.text("用法: /mpj delete ID [-n 笔记本]", stream_id)
             return True, "", True
@@ -1767,7 +1767,7 @@ class PromptJournalPlugin(MaiBotPlugin):
     @Command(
         "mpj_confirm",
         description="确认写入被去重检测拦截的笔记",
-        pattern=r"^/mpj\s+confirm\s+(.+)$",
+        pattern=r"^/mpj\s+confirm\s+(?P<token>.+)$",
     )
     async def handle_cmd_confirm(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, bool]:
         user_id = str(kwargs.get("user_id", "") or "").strip()
@@ -1775,7 +1775,7 @@ class PromptJournalPlugin(MaiBotPlugin):
             return True, "", False
 
         matched_groups = kwargs.get("matched_groups", {})
-        token = str(matched_groups.get(1, "") or "").strip()
+        token = str(matched_groups.get("token", "") or "").strip()
         if not token:
             await self.ctx.send.text("用法: /mpj confirm <确认码>", stream_id)
             return True, "", True
@@ -1864,7 +1864,7 @@ class PromptJournalPlugin(MaiBotPlugin):
     @Command(
         "mpj_new",
         description="创建空白笔记本",
-        pattern=r"^/mpj\s+new\s+(.+)$",
+        pattern=r"^/mpj\s+new\s+(?P<name>.+)$",
     )
     async def handle_cmd_new(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, bool]:
         user_id = str(kwargs.get("user_id", "") or "").strip()
@@ -1872,7 +1872,7 @@ class PromptJournalPlugin(MaiBotPlugin):
             return True, "", False
 
         matched_groups = kwargs.get("matched_groups", {})
-        name = str(matched_groups.get(1, "") or "").strip()
+        name = str(matched_groups.get("name", "") or "").strip()
         if not name:
             await self.ctx.send.text("用法: /mpj new <笔记本名>", stream_id)
             return True, "", True

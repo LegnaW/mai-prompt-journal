@@ -207,6 +207,12 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 - 笔记本名称统一用 `-n xxx` 后缀语法，`_parse_notebook_flag()` 解析
 - `search` 支持 `-n all` 跨笔记本搜索
 
+### 坑：命令正则必须用**命名捕获组**
+宿主 `find_command_by_text`（`src/plugin_runtime/host/component_registry.py`）匹配命令后只回传 `m.groupdict()`（命名捕获组 dict）。**位置捕获组 `(.+)` 的 group 1 取不到**，`matched_groups.get(1)` 恒为空 → 命令永远走"用法"提示分支。
+- 正确写法：`pattern=r"^/mpj\s+new\s+(?P<name>.+)$"`，handler 里 `matched_groups.get("name")`。
+- 参考：内置插件管理命令用 `matched_groups.get("manage_command")`；本插件 `/mpj rebuild` 的 `(?P<full>--full)` 同理。
+- 新增带参数命令时，务必用命名组，并同步在此登记 group 名。
+
 ## WebUI 规范
 
 ### 架构
