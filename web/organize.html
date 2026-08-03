@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>操作数据库 - 麦麦的绘图笔记本</title>
+<link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+<div class="container">
+  <div id="nav"></div>
+
+  <div class="card" id="organizeDbCard">
+    <div class="row" style="justify-content: space-between; margin-bottom: 8px;">
+      <strong>LLM 操作数据库</strong>
+      <button class="btn btn-outline btn-sm" id="organizeDbToggleBtn" onclick="toggleCard('organizeDb')">收起</button>
+    </div>
+    <div id="organizeDbCardBody">
+    <div class="row" style="margin-bottom: 12px;">
+      <label>笔记本:</label>
+      <select id="organizeDbNotebook" class="notebook-select"><option value="default">default</option></select>
+      <button class="btn" onclick="doOrganizeDbPlan()">生成操作方案</button>
+    </div>
+    <div style="margin-bottom: 12px;">
+      <div class="row" style="margin-bottom: 4px;">
+        <label>模式:</label>
+        <label><input type="radio" name="organizeDbMode" value="learn_style" onchange="updateOrganizeDbModePrompt()"> 学习描述方式</label>
+        <label><input type="radio" name="organizeDbMode" value="import_character" onchange="updateOrganizeDbModePrompt()"> 导入人物形象</label>
+        <label><input type="radio" name="organizeDbMode" value="action_template" onchange="updateOrganizeDbModePrompt()"> 提取动作模板</label>
+        <label><input type="radio" name="organizeDbMode" value="none" checked onchange="updateOrganizeDbModePrompt()"> 无附加提示词</label>
+      </div>
+      <div style="font-size:12px;color:#999;">选项将影响请求提示词：选择"学习描述方式"时输入你想要学习的提示词全文；选择"导入人物形象"时输入角色名称与形象设定；选择"提取动作模板"时输入完整的提示词；选择"无附加提示词"时直接输入操作要求。每次点击"生成操作方案"都会新建对话。</div>
+    </div>
+    <div style="margin-bottom: 12px;">
+      <label style="display:block; margin-bottom:4px;">附加提示词:</label>
+      <div id="organizeDbModePromptDisplay" style="font-size:12px;color:#555;background:#f5f5f5;border:1px solid #eee;border-radius:4px;padding:6px 8px;margin-bottom:8px;white-space:pre-wrap;word-break:break-all;">附加提示词: 无</div>
+      <label style="display:block; margin-bottom:4px;">操作要求（随请求提交给 AI）:</label>
+      <textarea id="organizeDbRequirement" rows="2" placeholder="根据所选模式填写：学习描述方式=提示词全文；导入人物形象=角色名称与设定；提取动作模板=完整提示词；无附加提示词=直接填写操作要求"></textarea>
+    </div>
+    <div id="organizeDbResult"></div>
+    </div>
+  </div>
+</div>
+
+<script src="/web/app.js"></script>
+<script>
+let organizeDbPlan = null;
+let organizeDbSessionId = null;
+let organizeDbTaskId = null;
+
+const ORGANIZE_DB_MODE_PROMPTS = {
+  learn_style: '阅读以下提示词，找出有学习价值且没有与已知数据库重复的提示词片段。应优先记录有意义的 tag 组合或搭配（如形象设计、表情动作、背景、氛围、服装与配饰等彼此搭配形成的完整特征，一般由 3~6 个 tag 构成），不要只记录孤立、通用的单一 tag——单独一个常见 tag 通常缺乏学习价值且容易与已有条目重复。若关键描述片段本身是用自然语言写成的，也可以直接以这段自然语言进行记录。对每个片段在note中简要总结其作用并给出使用场景。',
+  import_character: '以下为某个自定义角色形象的名称和形象设定，若笔记本内不存在这名角色的设定信息，则将其整理为1条笔记，在备注中写明人物名称。若存在重复，则更新已有的笔记。',
+  action_template: '以下为一组完整的提示词，请去除其中的所有角色形象描述（包括发型发色、外观面貌、服装饰品等等），仅保留动作描述，整理为1条笔记，在备注中除内容简要总结/使用场景外，还要额外备注"此为动作模板，无形象描述，需添加后使用"。',
+  none: '',
+};
+
+function getOrganizeDbMode() {
+  const el = document.querySelector('input[name="organizeDbMode"]:checked');
+  return el ? el.value : 'none';
+}
+
+function updateOrganizeDbModePrompt() {
+  const mode = getOrganizeDbMode();
+  const prompt = ORGANIZE_DB_MODE_PROMPTS[mode] || '';
+  const display = document.getElementById('organizeDbModePromptDisplay');
+  if (display) {
+    display.textContent = '附加提示词: ' + (prompt || '无');
+  }
+}
+
+function doOrganizeDbPlan() {
+  const nb = document.getElementById('organizeDbNotebook').value;
+  const mode = getOrganizeDbMode();
+  const userReq = document.getElementById('organizeDbRequirement').value.trim();
+  if (!userReq) { alert('请先输入操作要求'); return; }
+  const modePrompt = ORGANIZE_DB_MODE_PROMPTS[mode] || '';
+  const requirement = (modePrompt + (userReq ? '\n\n' + userReq : '')).trim();
+  const div = document.getElementById('organizeDbResult');
+  div.innerHTML = '<p style="color:#999">LLM 正在思考中...</p>';
+  api('POST', '/api/organize_db/plan', { notebook: nb, requirement: requirement }).then(data => {
+    if (data.error) { div.innerHTML = `<p style="color:#c62828">${esc(data.error)}</p>`; return; }
+    organizeDbTaskId = data.task_id || null;
+    if (organizeDbTaskId) { pollOrganizeDbTask(); return; }
+    div.innerHTML = '<p style="color:#c62828">未获取到任务 ID，请重试</p>';
+  }).catch(() => { div.innerHTML = '<p style="color:#c62828">生成方案失败，请重试</p>'; });
+}
+
+function doOrganizeDbAppend() {
+  if (!organizeDbSessionId) { alert('请先生成操作方案'); return; }
+  const reqEl = document.getElementById('organizeDbSupplement');
+  const req = reqEl ? reqEl.value.trim() : '';
+  if (!req) { alert('请先输入补充要求'); return; }
+  const nb = document.getElementById('organizeDbNotebook').value;
+  const div = document.getElementById('organizeDbResult');
+  div.innerHTML = '<p style="color:#999">LLM 正在思考中...</p>';
+  api('POST', '/api/organize_db/plan', { notebook: nb, session_id: organizeDbSessionId, requirement: req }).then(data => {
+    if (data.error) {
+      div.innerHTML = (organizeDbPlan ? renderOrganizeDbPlan(organizeDbPlan) : '') + `<p style="color:#c62828">${esc(data.error)}</p>`;
+      return;
+    }
+    organizeDbTaskId = data.task_id || null;
+    if (organizeDbTaskId) { pollOrganizeDbTask(); return; }
+    div.innerHTML = '<p style="color:#c62828">未获取到任务 ID，请重试</p>';
+  }).catch(() => {
+    div.innerHTML = (organizeDbPlan ? renderOrganizeDbPlan(organizeDbPlan) : '') + '<p style="color:#c62828">补充失败，请重试</p>';
+  });
+}
+
+function pollOrganizeDbTask() {
+  const div = document.getElementById('organizeDbResult');
+  const poll = () => {
+    if (!organizeDbTaskId) return;
+    api('GET', `/api/organize_db/plan_status?task_id=${encodeURIComponent(organizeDbTaskId)}`).then(data => {
+      if (data.error) {
+        organizeDbTaskId = null;
+        div.innerHTML = (organizeDbPlan ? renderOrganizeDbPlan(organizeDbPlan) : '') + `<p style="color:#c62828">${esc(data.error)}</p>`;
+        return;
+      }
+      if (data.status === 'running') {
+        const searches = data.searches || [];
+        if (searches.length === 0) {
+          div.innerHTML = '<p style="color:#999">LLM 正在思考中...</p>';
+        } else {
+          const last = searches[searches.length - 1];
+          div.innerHTML = `<p style="color:#999">LLM 正在检索：'${esc(last.keyword || '')}'（已检索 ${searches.length} 次）...</p>`;
+        }
+        setTimeout(poll, 1000);
+        return;
+      }
+      organizeDbTaskId = null;
+      if (data.status === 'error') {
+        div.innerHTML = (organizeDbPlan ? renderOrganizeDbPlan(organizeDbPlan) : '') + `<p style="color:#c62828">${esc(data.error || '操作失败')}</p>`;
+        return;
+      }
+      const plan = data.plan;
+      organizeDbSessionId = plan.session_id || null;
+      organizeDbPlan = plan;
+      div.innerHTML = renderOrganizeDbPlan(plan);
+    }).catch(() => {
+      organizeDbTaskId = null;
+      div.innerHTML = '<p style="color:#c62828">获取任务状态失败，请重试</p>';
+    });
+  };
+  poll();
+}
+
+function renderOrganizeDbPlan(data) {
+  const ops = data.operations || [];
+  let lines = '<div style="background:#f8f9fa;padding:10px;border-radius:6px;">';
+  lines += `<div><strong>操作说明：</strong>${esc(data.reason || '')}</div>`;
+  if (ops.length === 0) {
+    lines += '<div style="margin-top:6px;color:#2e7d32">方案为空：无需修改</div>';
+  } else {
+    lines += `<div style="margin-top:6px;"><strong>共 ${ops.length} 条操作：</strong></div>`;
+    ops.forEach((op, i) => {
+      if (op.type === 'create') {
+        lines += `<div style="margin-top:4px;color:#2e7d32">${i+1}. 新建: ${esc(op.en)} / ${esc(op.zh)}${op.note ? ' — ' + esc(op.note) : ''}</div>`;
+      } else if (op.type === 'update') {
+        const old = op._old || {};
+        const fields = [];
+        if (op.en !== undefined) fields.push(`en: ${esc(old.en||'')} → ${esc(op.en)}`);
+        if (op.zh !== undefined) fields.push(`zh: ${esc(old.zh||'')} → ${esc(op.zh)}`);
+        if (op.note !== undefined) fields.push(`note: ${esc(old.note||'')} → ${esc(op.note)}`);
+        lines += `<div style="margin-top:4px;color:#1565c0">${i+1}. 修改 ${esc(op.id)}: ${fields.join('；')}</div>`;
+      } else if (op.type === 'delete') {
+        const old = op._old || {};
+        lines += `<div style="margin-top:4px;color:#c62828">${i+1}. 删除 ${esc(op.id)}（${esc(old.en||'')} / ${esc(old.zh||'')}）</div>`;
+      } else {
+        lines += `<div style="margin-top:4px;color:#999">${i+1}. ${esc(op.type)}</div>`;
+      }
+    });
+  }
+  lines += `<div class="row" style="margin-top:10px;align-items:stretch;">
+    <input type="text" id="organizeDbSupplement" placeholder="补充要求（可选，追加后 AI 将重新生成完整方案覆盖本轮）" style="flex:1;min-width:0;">
+    <button class="btn btn-sm btn-outline" onclick="doOrganizeDbAppend()">追加要求</button>
+  </div>`;
+  lines += `<div class="row" style="margin-top:8px;">
+    <button class="btn btn-sm btn-success" onclick="doOrganizeDbApply()">确认执行</button>
+    <button class="btn btn-sm btn-outline" onclick="clearOrganizeDb()">清除</button>
+  </div></div>`;
+  return lines;
+}
+
+function clearOrganizeDb() {
+  organizeDbPlan = null;
+  organizeDbSessionId = null;
+  organizeDbTaskId = null;
+  document.getElementById('organizeDbResult').innerHTML = '';
+}
+
+function doOrganizeDbApply() {
+  if (!organizeDbPlan) { alert('请先生成操作方案'); return; }
+  const ops = organizeDbPlan.operations || [];
+  if (ops.length === 0) { alert('方案为空，无需执行'); return; }
+  const nb = document.getElementById('organizeDbNotebook').value;
+  if (!confirm(`确认执行 ${ops.length} 条操作？执行后索引将重建。`)) return;
+  api('POST', '/api/organize_db/apply', {
+    notebook: nb,
+    operations: ops,
+    session_id: organizeDbSessionId || undefined,
+  }).then(data => {
+    if (data.error) { alert(data.error); return; }
+    alert(`已执行，剩余 ${data.remaining} 条；索引已重建（复用${data.rebuild.reused}，新建${data.rebuild.rebuilt}）`);
+    clearOrganizeDb();
+    loadStatus();
+  }).catch(() => {});
+}
+
+injectNav('organize');
+updateOrganizeDbModePrompt();
+loadStatus();
+</script>
+</body>
+</html>

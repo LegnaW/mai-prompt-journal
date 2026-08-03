@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>麦麦的绘图笔记本</title>
+<link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+<div class="container">
+  <div id="nav"></div>
+
+  <div class="row" style="justify-content: space-between; margin-bottom: 12px;">
+    <h1>📒 麦麦的绘图笔记本</h1>
+    <div class="row">
+      <button class="btn btn-outline btn-sm" onclick="doRefresh()">刷新</button>
+      <button class="btn btn-outline btn-sm" onclick="doRebuild()">重建索引</button>
+      <button class="btn btn-outline btn-sm" onclick="doRebuildFull()">全量重构索引</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="status-bar" id="statusBar">加载中...</div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <input type="text" id="searchInput" placeholder="搜索关键词..." onkeydown="if(event.key==='Enter')doSearch()">
+      <select id="searchNotebook" class="notebook-select" data-all="1"><option value="default">default</option><option value="all">全部</option></select>
+      <button class="btn" onclick="doSearch()">搜索</button>
+      <button class="btn btn-outline" onclick="loadNotes()">浏览全部</button>
+      <button class="btn btn-outline btn-sm" id="searchToggleBtn" onclick="toggleSearchResults()" style="display:none;">收起结果</button>
+    </div>
+    <div id="searchResults"></div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="margin-bottom: 8px;">
+      <strong>添加笔记</strong>
+    </div>
+    <div class="add-form">
+      <input type="text" id="addEn" placeholder="英文标签">
+      <input type="text" id="addZh" placeholder="中文释义">
+      <input type="text" id="addNote" placeholder="备注（可选）">
+      <button class="btn btn-success" onclick="doAdd()">添加</button>
+    </div>
+    <div class="row" style="margin-top: 8px;">
+      <label>目标笔记本:</label>
+      <select id="addNotebook" class="notebook-select"><option value="default">default</option></select>
+    </div>
+  </div>
+
+  <div class="card hidden" id="notesCard">
+    <div class="row" style="justify-content: space-between; margin-bottom: 8px;">
+      <strong id="notesTitle">笔记列表</strong>
+      <button class="btn btn-outline btn-sm" onclick="document.getElementById('notesCard').classList.add('hidden')">关闭</button>
+    </div>
+    <div style="overflow-x: auto;">
+      <table>
+        <thead><tr><th>来源</th><th>英文</th><th>中文</th><th>备注</th><th>ID</th><th>操作</th></tr></thead>
+        <tbody id="notesBody"></tbody>
+      </table>
+    </div>
+    <div class="pagination" id="pagination"></div>
+  </div>
+</div>
+
+<script src="/web/app.js"></script>
+<script>
+let currentPage = 1;
+let currentNotebook = 'default';
+
+function toggleSearchResults() {
+  const div = document.getElementById('searchResults');
+  const btn = document.getElementById('searchToggleBtn');
+  const hidden = div.classList.toggle('hidden');
+  btn.textContent = hidden ? '展开结果' : '收起结果';
+}
+
+function showSearchResults() {
+  const div = document.getElementById('searchResults');
+  const btn = document.getElementById('searchToggleBtn');
+  div.classList.remove('hidden');
+  btn.style.display = 'inline-block';
+  btn.textContent = '收起结果';
+}
+
+function doSearch() {
+  const q = document.getElementById('searchInput').value.trim();
+  const nb = document.getElementById('searchNotebook').value;
+  if (!q) return;
+  api('GET', `/api/search?q=${encodeURIComponent(q)}&notebook=${nb}&limit=20`).then(data => {
+    const div = document.getElementById('searchResults');
+    if (!data.results || data.results.length === 0) { div.innerHTML = '<p style="color:#999;padding:8px">未找到相关笔记</p>'; showSearchResults(); return; }
+    div.innerHTML = '<table><thead><tr><th>来源</th><th>英文</th><th>中文</th><th>备注</th><th>相似度</th><th>ID</th><th>操作</th></tr></thead><tbody>' +
+      data.results.map(r => `<tr>
+        <td class="nb">${r.notebook||nb}</td><td>${esc(r.en)}</td><td>${esc(r.zh)}</td><td>${esc(r.note||'')}</td>
+        <td class="score">${(r.score||0).toFixed(2)}</td><td class="id">${r.id}</td>
+        <td>
+          <button class="btn btn-sm" onclick="startEdit('${r.id}','${r.notebook||nb}')">编辑</button>
+          <button class="btn btn-danger btn-sm" onclick="doDelete('${r.id}','${r.notebook||nb}')">删除</button>
+        </td>
+      </tr>
+      <tr id="editrow_${r.id}" class="hidden">
+        <td colspan="7">
+          <div class="row">
+            <input type="text" id="editen_${r.id}" placeholder="英文" value="${esc(r.en||'')}">
+            <input type="text" id="editzh_${r.id}" placeholder="中文" value="${esc(r.zh||'')}">
+            <input type="text" id="editnote_${r.id}" placeholder="备注" value="${esc(r.note||'')}">
+            <button class="btn btn-sm btn-success" onclick="saveEdit('${r.id}','${r.notebook||nb}')">保存</button>
+            <button class="btn btn-sm btn-outline" onclick="cancelEdit('${r.id}')">取消</button>
+          </div>
+        </td>
+      </tr>`).join('') + '</tbody></table>';
+    showSearchResults();
+  }).catch(() => {});
+}
+
+function startEdit(id, nb) {
+  const row = document.getElementById('editrow_' + id);
+  if (row) row.classList.remove('hidden');
+}
+
+function cancelEdit(id) {
+  const row = document.getElementById('editrow_' + id);
+  if (row) row.classList.add('hidden');
+}
+
+function saveEdit(id, nb) {
+  const en = document.getElementById('editen_' + id).value.trim();
+  const zh = document.getElementById('editzh_' + id).value.trim();
+  const note = document.getElementById('editnote_' + id).value.trim();
+  if (!en || !zh) { alert('英文和中文不能为空'); return; }
+  api('POST', '/api/modify', { note_id: id, notebook: nb, en: en, zh: zh, note: note }).then(data => {
+    if (data.error) { alert(data.error); return; }
+    cancelEdit(id);
+    const notesVisible = !document.getElementById('notesCard').classList.contains('hidden');
+    if (notesVisible) fetchNotes(); else doSearch();
+  }).catch(() => {});
+}
+
+function loadNotes() {
+  const nb = document.getElementById('searchNotebook').value;
+  if (nb === 'all') { alert('请选择具体笔记本浏览'); return; }
+  currentNotebook = nb;
+  currentPage = 1;
+  fetchNotes();
+}
+
+function fetchNotes() {
+  api('GET', `/api/notes?notebook=${currentNotebook}&page=${currentPage}&size=20`).then(data => {
+    document.getElementById('notesCard').classList.remove('hidden');
+    document.getElementById('notesTitle').textContent = `${currentNotebook} (${data.total} 条)`;
+    const tbody = document.getElementById('notesBody');
+    tbody.innerHTML = (data.notes || []).map(n => `<tr>
+      <td class="nb">${currentNotebook}</td>
+      <td>${esc(n.en)}</td><td>${esc(n.zh)}</td><td>${esc(n.note||'')}</td>
+      <td class="id">${n.id}</td>
+      <td>
+        <button class="btn btn-sm" onclick="startEdit('${n.id}','${currentNotebook}')">编辑</button>
+        <button class="btn btn-danger btn-sm" onclick="doDelete('${n.id}','${currentNotebook}')">删除</button>
+      </td>
+    </tr>
+    <tr id="editrow_${n.id}" class="hidden">
+      <td colspan="6">
+        <div class="row">
+          <input type="text" id="editen_${n.id}" placeholder="英文" value="${esc(n.en||'')}">
+          <input type="text" id="editzh_${n.id}" placeholder="中文" value="${esc(n.zh||'')}">
+          <input type="text" id="editnote_${n.id}" placeholder="备注" value="${esc(n.note||'')}">
+          <button class="btn btn-sm btn-success" onclick="saveEdit('${n.id}','${currentNotebook}')">保存</button>
+          <button class="btn btn-sm btn-outline" onclick="cancelEdit('${n.id}')">取消</button>
+        </div>
+      </td>
+    </tr>`).join('') || '<tr><td colspan="6" style="color:#999;text-align:center">空</td></tr>';
+    const pag = document.getElementById('pagination');
+    pag.innerHTML = '';
+    if (data.pages > 1) {
+      pag.innerHTML += `<button class="btn btn-outline btn-sm" ${currentPage<=1?'disabled':''} onclick="currentPage--;fetchNotes()">上一页</button>`;
+      pag.innerHTML += `<span> ${currentPage} / ${data.pages} </span>`;
+      pag.innerHTML += `<button class="btn btn-outline btn-sm" ${currentPage>=data.pages?'disabled':''} onclick="currentPage++;fetchNotes()">下一页</button>`;
+    }
+  }).catch(() => {});
+}
+
+function doAdd() {
+  const en = document.getElementById('addEn').value.trim();
+  const zh = document.getElementById('addZh').value.trim();
+  const note = document.getElementById('addNote').value.trim();
+  const nb = document.getElementById('addNotebook').value;
+  if (!en || !zh) { alert('英文和中文必填'); return; }
+  api('POST', '/api/add', { notebook: nb, notes: [{ en, zh, note }] }).then(data => {
+    if (data.error) { alert(data.error); return; }
+    document.getElementById('addEn').value = '';
+    document.getElementById('addZh').value = '';
+    document.getElementById('addNote').value = '';
+    loadStatus();
+    alert('已添加');
+  }).catch(() => {});
+}
+
+function doDelete(id, nb) {
+  if (!confirm(`确认删除笔记 ${id}？`)) return;
+  api('POST', '/api/delete', { note_id: id, notebook: nb }).then(data => {
+    if (data.error) { alert(data.error); return; }
+    loadStatus();
+    const visible = !document.getElementById('notesCard').classList.contains('hidden');
+    if (visible) fetchNotes(); else doSearch();
+  }).catch(() => {});
+}
+
+function doRefresh() {
+  api('POST', '/api/refresh').then(data => {
+    loadStatus();
+    const notesVisible = !document.getElementById('notesCard').classList.contains('hidden');
+    if (notesVisible) fetchNotes();
+    alert('已刷新');
+  }).catch(() => {});
+}
+
+function doRebuild() {
+  if (!confirm('确认重建所有笔记本索引？可能需要一些时间。')) return;
+  api('POST', '/api/rebuild').then(data => {
+    if (data.error) { alert(data.error); return; }
+    pollTasks();
+  }).catch(() => {});
+}
+
+function doRebuildFull() {
+  if (!confirm('确认全量重构所有笔记本索引？将忽略缓存、全部重新计算向量（换 embedding 模型后使用），可能需要较长时间。')) return;
+  api('POST', '/api/rebuild', { force: true }).then(data => {
+    if (data.error) { alert(data.error); return; }
+    pollTasks();
+  }).catch(() => {});
+}
+
+injectNav('index');
+loadStatus();
+</script>
+</body>
+</html>

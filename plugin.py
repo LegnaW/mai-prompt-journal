@@ -649,6 +649,7 @@ class PromptJournalPlugin(MaiBotPlugin):
         self._web_runner: Any = None
         self._organize_sessions: dict[str, dict[str, Any]] = {}
         self._organize_tasks: dict[str, dict[str, Any]] = {}
+        self._tasks: dict[str, dict[str, Any]] = {}
 
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self._imports_dir.mkdir(parents=True, exist_ok=True)
@@ -1624,6 +1625,10 @@ class PromptJournalPlugin(MaiBotPlugin):
             app.middlewares.append(warning_middleware)
         else:
             app.router.add_get("/", self._web_index)
+            # 静态资源（多页面的 css/js/html）
+            web_dir = Path(__file__).parent / "web"
+            if web_dir.is_dir():
+                app.router.add_static("/web/", web_dir)
             app.router.add_post("/api/login", self._web_login)
             app.router.add_post("/api/logout", self._web_logout)
             app.router.add_get("/api/status", self._web_status)
@@ -1634,6 +1639,7 @@ class PromptJournalPlugin(MaiBotPlugin):
             app.router.add_post("/api/delete", self._web_delete)
             app.router.add_post("/api/refresh", self._web_refresh)
             app.router.add_post("/api/rebuild", self._web_rebuild)
+            app.router.add_get("/api/tasks", self._web_tasks)
             app.router.add_get("/api/dedup/scan", self._web_dedup_scan)
             app.router.add_post("/api/dedup/resolve", self._web_dedup_resolve)
             app.router.add_post("/api/dedup/organize_preview", self._web_organize_preview)
@@ -1680,14 +1686,14 @@ class PromptJournalPlugin(MaiBotPlugin):
         return bool(token) and token == password
 
     async def _web_index(self, request: Any) -> Any:
-        """返回 WebUI HTML 页面，始终返回 HTML，认证由 API 端点处理。"""
+        """返回 WebUI 首页 HTML，始终返回 HTML，认证由 API 端点处理。"""
         from aiohttp import web
 
-        html_path = Path(__file__).parent / "webui.html"
+        html_path = Path(__file__).parent / "web" / "index.html"
         if html_path.exists():
             html = html_path.read_text(encoding="utf-8")
         else:
-            html = "<html><body><h1>webui.html 未找到</h1></body></html>"
+            html = "<html><body><h1>web/index.html 未找到</h1></body></html>"
         return web.Response(text=html, content_type="text/html")
 
     async def _web_login(self, request: Any) -> Any:
@@ -1959,19 +1965,39 @@ class PromptJournalPlugin(MaiBotPlugin):
             return web.json_response({"error": "unauthorized"}, status=401)
         body = await self._web_read_body(request)
         force_full = bool(body.get("force", False))
-        results: list[dict[str, Any]] = []
-        async with self._lock:
-            self._notebooks = self._discover_notebooks()
-            for name in sorted(self._notebooks.keys()):
-                nb = self._notebooks[name]
-                if not nb.has_source:
-                    continue
-                try:
-                    stats = await self._rebuild_notebook(nb, force_full=force_full)
-                    results.append({"notebook": name, **stats})
-                except Exception as exc:
-                    results.append({"notebook": name, "error": str(exc)})
-        return web.json_response({"results": results})
+        label = "全量重构索引" if force_full else "重建索引"
+
+        task_id = self._start_task("rebuild", label)
+        if task_id is None:
+            return web.json_response({"error": "已有后台任务进行中，请等待完成后再试"}, status=409)
+        asyncio.create_task(self._run_rebuild_task(task_id, force_full))
+        return web.json_response({"task_id": task_id})
+
+    async def _run_rebuild_task(self, task_id: str, force_full: bool) -> None:
+        """后台执行索引重建，逐笔记本汇报进度。"""
+        try:
+            async with self._lock:
+                self._notebooks = self._discover_notebooks()
+                names = [n for n in sorted(self._notebooks.keys()) if self._notebooks[n].has_source]
+                total = len(names)
+                results: list[dict[str, Any]] = []
+                for done, name in enumerate(names, 1):
+                    nb = self._notebooks[name]
+                    task = self._tasks.get(task_id)
+                    if task is not None:
+                        task["progress"] = {"total": total, "done": done, "current": name}
+                    try:
+                        stats = await self._rebuild_notebook(nb, force_full=force_full)
+                        results.append({"notebook": name, **stats})
+                    except Exception as exc:
+                        self.ctx.logger.error(f"笔记本 {name} 重建失败: {exc}", exc_info=True)
+                        results.append({"notebook": name, "error": str(exc)})
+                self._finish_task(task_id, {"results": results})
+        except Exception as exc:
+            self.ctx.logger.error(f"索引重建后台任务异常: {exc}", exc_info=True)
+            self._fail_task(task_id, exc)
+        finally:
+            self._evict_tasks()
 
     # ============================================================
     # WebUI 去重 API
@@ -2275,6 +2301,71 @@ class PromptJournalPlugin(MaiBotPlugin):
             oldest = sorted(self._organize_tasks.items(), key=lambda kv: kv[1]["created_at"])
             for tid, _ in oldest[: len(self._organize_tasks) - limit]:
                 self._organize_tasks.pop(tid, None)
+
+    # ============================================================
+    # 通用后台任务中心（当前活跃任务）
+    # ============================================================
+
+    def _task_busy(self) -> bool:
+        """是否存在进行中的后台任务。"""
+        return any(t.get("status") == "running" for t in self._tasks.values())
+
+    def _start_task(self, task_type: str, label: str) -> str | None:
+        """登记一个后台任务，返回 task_id；已有任务进行中时返回 None。"""
+        if self._task_busy():
+            return None
+        task_id = uuid.uuid4().hex
+        self._tasks[task_id] = {
+            "id": task_id,
+            "type": task_type,
+            "label": label,
+            "status": "running",
+            "progress": {},
+            "created_at": time.time(),
+            "finished_at": None,
+            "result": None,
+            "error": None,
+        }
+        return task_id
+
+    def _finish_task(self, task_id: str, result: Any) -> None:
+        task = self._tasks.get(task_id)
+        if task is None:
+            return
+        task["status"] = "done"
+        task["result"] = result
+        task["finished_at"] = time.time()
+
+    def _fail_task(self, task_id: str, error: Any) -> None:
+        task = self._tasks.get(task_id)
+        if task is None:
+            return
+        task["status"] = "error"
+        task["error"] = str(error)
+        task["finished_at"] = time.time()
+
+    def _evict_tasks(self) -> None:
+        """通用任务结果保留 TTL 并限制数量。"""
+        ttl = 300.0
+        limit = 50
+        now = time.time()
+        stale = [tid for tid, t in self._tasks.items() if now - t["created_at"] > ttl]
+        for tid in stale:
+            self._tasks.pop(tid, None)
+        if len(self._tasks) > limit:
+            oldest = sorted(self._tasks.items(), key=lambda kv: kv[1]["created_at"])
+            for tid, _ in oldest[: len(self._tasks) - limit]:
+                self._tasks.pop(tid, None)
+
+    async def _web_tasks(self, request: Any) -> Any:
+        """返回所有后台任务（进行中的在前），供"当前活跃任务"面板轮询。"""
+        from aiohttp import web
+
+        if not self._web_check_auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        self._evict_tasks()
+        tasks = sorted(self._tasks.values(), key=lambda t: (t["status"] != "running", t["created_at"]))
+        return web.json_response({"tasks": tasks})
 
     async def _web_organize_db_apply(self, request: Any) -> Any:
         """确认并执行 LLM 修改方案，重建索引。"""

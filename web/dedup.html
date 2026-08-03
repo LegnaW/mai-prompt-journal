@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>去重 - 麦麦的绘图笔记本</title>
+<link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+<div class="container">
+  <div id="nav"></div>
+
+  <div class="card">
+    <div class="row" style="justify-content: space-between; margin-bottom: 8px;">
+      <strong>语义去重扫描</strong>
+      <button class="btn btn-outline btn-sm" id="dedupToggleBtn" onclick="toggleCard('dedup')">收起</button>
+    </div>
+    <div id="dedupCardBody">
+    <div class="row" style="margin-bottom: 12px;">
+      <label>笔记本:</label>
+      <select id="dedupNotebook" class="notebook-select"><option value="default">default</option></select>
+      <label>阈值:</label>
+      <input type="range" id="dedupThreshold" min="0.5" max="0.99" step="0.01" value="0.92" style="flex:0 0 120px;" oninput="document.getElementById('thresholdValue').textContent=this.value">
+      <span id="thresholdValue">0.92</span>
+      <button class="btn" onclick="doDedupScan()">扫描</button>
+    </div>
+    <div id="dedupResults"></div>
+    </div>
+  </div>
+</div>
+
+<script src="/web/app.js"></script>
+<script>
+let dedupGroups = [];
+let dedupPreviews = {};
+
+function renderDedupGroups(data) {
+  const div = document.getElementById('dedupResults');
+  if (!data.groups || data.groups.length === 0) {
+    div.innerHTML = '<p style="color:#2e7d32">未发现重复</p>';
+    dedupGroups = [];
+    return;
+  }
+  dedupGroups = data.groups;
+  dedupPreviews = {};
+  div.innerHTML = `
+    <div style="background:#f0f7ff;border:1px solid #b3d4fc;border-radius:8px;padding:10px 12px;font-size:12px;color:#333;margin-bottom:10px;line-height:1.7;">
+      <strong>去重方式说明：</strong><br>
+      · <strong>LLM 整理</strong>：由 AI 综合整组内容重写为 1~N 条更精简的笔记（可先在下方的「整理意见」框填写要求），预览确认后替换整组。<br>
+      · <strong>编辑 / 删除</strong>：可对组内某条笔记单独编辑或删除，保存后自动重新扫描刷新列表。
+    </div>
+    <p>发现 ${data.groups.length} 组潜在重复（阈值 ${data.threshold}）</p>` +
+    data.groups.map((group, gi) => `
+      <div style="border:1px solid #eee;padding:12px;margin:8px 0;border-radius:8px">
+        <strong>重复组 ${gi+1}（${group.entries.length} 条）</strong>
+        ${group.entries.map((e, ei) => `
+          <div style="margin:6px 0">
+            <div class="row" style="flex-wrap:wrap;align-items:flex-start;">
+              <span style="flex:1;min-width:0;word-break:break-all;">${esc(e.en)} / ${esc(e.zh)}${e.note?' — '+esc(e.note):''}</span>
+              <span class="id">${e.id}</span>
+              <div style="display:flex;flex-direction:column;gap:4px;flex:0 0 auto;">
+                <button class="btn btn-sm" onclick="startDedupEdit(${gi},${ei})">编辑</button>
+                <button class="btn btn-danger btn-sm" onclick="doDedupDelete(${gi},${ei})">删除</button>
+              </div>
+            </div>
+            <div id="dedupeditrow_${gi}_${ei}" class="hidden" style="margin-top:6px;">
+              <div class="row">
+                <input type="text" id="dedupediten_${gi}_${ei}" placeholder="英文" value="${esc(e.en||'')}">
+                <input type="text" id="dedupeditzh_${gi}_${ei}" placeholder="中文" value="${esc(e.zh||'')}">
+                <input type="text" id="dedupeditnote_${gi}_${ei}" placeholder="备注" value="${esc(e.note||'')}">
+                <button class="btn btn-sm btn-success" onclick="saveDedupEdit(${gi},${ei})">保存</button>
+                <button class="btn btn-sm btn-outline" onclick="cancelDedupEdit(${gi},${ei})">取消</button>
+              </div>
+            </div>
+          </div>
+        `).join('')}
+        <input type="text" id="req_${gi}" placeholder="该组整理意见（可选，LLM 整理时提交）" style="width:100%; font-size:12px; margin:8px 0;">
+        <div class="row" style="margin-top:8px;">
+          <button class="btn btn-sm btn-success" onclick="doOrganizePreview(${gi})">LLM 整理</button>
+          <button class="btn btn-sm btn-outline" onclick="doClearPreview(${gi})">取消预览</button>
+        </div>
+        <div id="preview_${gi}" style="margin-top:8px;"></div>
+      </div>
+    `).join('');
+}
+
+function doDedupScan() {
+  const nb = document.getElementById('dedupNotebook').value;
+  const threshold = document.getElementById('dedupThreshold').value;
+  const div = document.getElementById('dedupResults');
+  div.innerHTML = '<p style="color:#999">扫描中...</p>';
+  api('GET', `/api/dedup/scan?notebook=${encodeURIComponent(nb)}&threshold=${threshold}`).then(data => {
+    if (data.error) { div.innerHTML = `<p style="color:#c62828">${esc(data.error)}</p>`; return; }
+    renderDedupGroups(data);
+  }).catch(() => {});
+}
+
+function startDedupEdit(gi, ei) {
+  const row = document.getElementById(`dedupeditrow_${gi}_${ei}`);
+  if (row) row.classList.remove('hidden');
+}
+
+function cancelDedupEdit(gi, ei) {
+  const row = document.getElementById(`dedupeditrow_${gi}_${ei}`);
+  if (row) row.classList.add('hidden');
+}
+
+function saveDedupEdit(gi, ei) {
+  const group = dedupGroups[gi];
+  if (!group || !group.entries[ei]) { alert('数据已失效，请重新扫描'); return; }
+  const id = group.entries[ei].id;
+  const en = document.getElementById(`dedupediten_${gi}_${ei}`).value.trim();
+  const zh = document.getElementById(`dedupeditzh_${gi}_${ei}`).value.trim();
+  const note = document.getElementById(`dedupeditnote_${gi}_${ei}`).value.trim();
+  if (!en || !zh) { alert('英文和中文不能为空'); return; }
+  const nb = document.getElementById('dedupNotebook').value;
+  api('POST', '/api/modify', { note_id: id, notebook: nb, en: en, zh: zh, note: note }).then(data => {
+    if (data.error) { alert(data.error); return; }
+    cancelDedupEdit(gi, ei);
+    doDedupScan();
+  }).catch(() => {});
+}
+
+function doDedupDelete(gi, ei) {
+  const group = dedupGroups[gi];
+  if (!group || !group.entries[ei]) { alert('数据已失效，请重新扫描'); return; }
+  const id = group.entries[ei].id;
+  if (!confirm(`确认删除笔记 ${id}？`)) return;
+  const nb = document.getElementById('dedupNotebook').value;
+  api('POST', '/api/delete', { note_id: id, notebook: nb }).then(data => {
+    if (data.error) { alert(data.error); return; }
+    doDedupScan();
+  }).catch(() => {});
+}
+
+function doOrganizePreview(gi) {
+  const group = dedupGroups[gi];
+  const box = document.getElementById('preview_' + gi);
+  const reqEl = document.getElementById('req_' + gi);
+  const requirement = reqEl ? reqEl.value.trim() : '';
+  const entries = group.entries.map(e => ({ en: e.en, zh: e.zh, note: e.note || '' }));
+  box.innerHTML = '<p style="color:#999">LLM 整理中...</p>';
+  api('POST', '/api/dedup/organize_preview', {
+    notebook: document.getElementById('dedupNotebook').value,
+    entries: entries,
+    requirement: requirement,
+  }).then(data => {
+    if (data.error) { box.innerHTML = `<p style="color:#c62828">${esc(data.error)}</p>`; return; }
+    dedupPreviews[gi] = { mode: 'organize', deleteIds: group.entries.map(e => e.id), newEntries: data.entries, reason: data.reason };
+    box.innerHTML = `
+      <div style="background:#f8f9fa;padding:10px;border-radius:6px;">
+        <div><strong>整理理由：</strong>${esc(data.reason || '')}</div>
+        <div style="margin-top:6px;"><strong>整理结果（${data.entries.length} 条，将替换整组 ${group.entries.length} 条）：</strong></div>
+        ${data.entries.map((e, i) => `<div style="margin-top:4px;">${i+1}. ${esc(e.en)} / ${esc(e.zh)}${e.note ? ' — ' + esc(e.note) : ''}</div>`).join('')}
+        <div class="row" style="margin-top:8px;">
+          <button class="btn btn-sm btn-success" onclick="doResolve(${gi})">确认整理</button>
+        </div>
+      </div>`;
+  }).catch(() => { box.innerHTML = '<p style="color:#c62828">LLM 整理失败，请重试</p>'; });
+}
+
+function doClearPreview(gi) {
+  delete dedupPreviews[gi];
+  const box = document.getElementById('preview_' + gi);
+  if (box) box.innerHTML = '';
+}
+
+function doResolve(gi) {
+  const p = dedupPreviews[gi];
+  if (!p) { alert('请先生成预览'); return; }
+  const nb = document.getElementById('dedupNotebook').value;
+  const threshold = document.getElementById('dedupThreshold').value;
+  if (!confirm(`确认按 LLM 整理结果替换整组？将删除 ${p.deleteIds.length} 条，写入 ${p.newEntries.length} 条`)) return;
+  const payload = { notebook: nb, threshold: threshold, delete_ids: p.deleteIds, new_entries: p.newEntries };
+  api('POST', '/api/dedup/resolve', payload).then(data => {
+    if (data.error) { alert(data.error); return; }
+    alert(`已处理，剩余 ${data.remaining} 条；索引已重建（复用${data.rebuild.reused}，新建${data.rebuild.rebuilt}）`);
+    dedupPreviews = {};
+    renderDedupGroups(data);
+    loadStatus();
+  }).catch(() => {});
+}
+
+injectNav('dedup');
+loadStatus();
+</script>
+</body>
+</html>

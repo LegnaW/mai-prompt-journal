@@ -28,9 +28,15 @@
 | 文件 | 职责 |
 |------|------|
 | `_manifest.json` | 插件元信息 + 能力声明 + 依赖声明 |
-| `plugin.py` | 全部业务逻辑（~2300 行） |
-| `webui.html` | WebUI 单页面（HTML+CSS+JS，无构建步骤） |
+| `plugin.py` | 全部业务逻辑（~3100 行） |
+| `web/index.html` | WebUI 首页（状态栏 + 搜索/浏览 + 添加 + 索引管理） |
+| `web/dedup.html` | WebUI 去重页 |
+| `web/organize.html` | WebUI 操作数据库页 |
+| `web/app.js` | WebUI 共享逻辑（api/esc/登录/loadStatus/导航注入） |
+| `web/style.css` | WebUI 共享样式 |
 | `config.toml` | 运行时配置 |
+
+WebUI 为多页面静态站点（无构建步骤）：`/` 返回 `web/index.html`，`/web/` 目录由 `_run_web_server` 中 `app.router.add_static("/web/", web_dir)` 提供服务。新增功能页 = 新建 `web/*.html` + 在 `app.js` 的 `NAV_ITEMS` 加导航项，并在页面底部调用 `injectNav('<id>')` + `loadStatus()`。
 
 ## 重要架构约束（先读，避免踩坑）
 
@@ -171,7 +177,7 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
   - 无 `session_id` → 新建会话跑初始轮；有 → 校验会话/notebook/非空补充后追加 user 消息重跑**覆盖**上一轮
   - `session_id` 不存在/不匹配 → error"会话已过期"；补充要求为空 → error"补充要求不能为空"
 - **错误透传**：`_run_organize_db_round` 返回 `(plan, messages, error)`，`_organize_db_plan` 失败返回 `{"_error":"llm","message":具体错误}`（含 `_direct_chat` 的 HTTP 详情），任务把具体错误放进 status，前端 `data.error` 直接展示（不再只显示"操作失败"）。
-- **模式（学习描述方式/导入人物形象/提取动作模板/无附加提示词）是纯前端**：`webui.html` 单选 `organizeDbMode`（默认 `none`），`doOrganizeDbPlan` 按模式把常量 `ORGANIZE_DB_MODE_PROMPTS` 前置拼进 `requirement` 提交（后端无 mode 字段）；只影响首轮，补充轮不附加。输入框上方有 `updateOrganizeDbModePrompt()` 驱动的只读展示区，实时显示当前模式附加的提示词全文（`none` 显示"无"）。
+- **模式（学习描述方式/导入人物形象/提取动作模板/无附加提示词）是纯前端**：`web/organize.html` 单选 `organizeDbMode`（默认 `none`），`doOrganizeDbPlan` 按模式把常量 `ORGANIZE_DB_MODE_PROMPTS` 前置拼进 `requirement` 提交（后端无 mode 字段）；只影响首轮，补充轮不附加。输入框上方有 `updateOrganizeDbModePrompt()` 驱动的只读展示区，实时显示当前模式附加的提示词全文（`none` 显示"无"）。
 - `POST /api/organize_db/apply` 成功后清除对应 `session_id` 会话。
 - 前端对话框内：方案预览 + [补充要求输入框 + 追加要求] + [确认执行] + [清除]，每轮刷新只显示最新方案。
 
@@ -241,10 +247,10 @@ Field(
 - 节标题 = `__ui_label__`，节描述 = 类 docstring（`_build_section_schema` 用 `config_class.__doc__`）。给每个配置节类写好中文 docstring。
 
 ### 验证 Schema 是否生成正确
-宿主 `python3`（3.10）无法 import 容器 SDK（numpy 是 3.13 编译的），用 `python3.13` + SDK site-packages 路径实测：
+宿主 `python3`（3.10）无法 import 容器 SDK，用已装好依赖的 uv 虚拟环境实测：
 ```python
+# 用 /root/mai/MaiBot-main/.venv/bin/python 执行
 import sys
-sys.path.insert(0, "/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/109/fs/MaiMBot/.venv/lib/python3.13/site-packages")
 sys.path.insert(0, "<插件目录>")
 import plugin as m
 from maibot_sdk.config import generate_plugin_config_schema
