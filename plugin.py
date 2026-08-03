@@ -2082,7 +2082,7 @@ class PromptJournalPlugin(MaiBotPlugin):
         return web.json_response({"reason": result["reason"], "entries": result["entries"]})
 
     async def _web_dedup_resolve(self, request: Any) -> Any:
-        """执行去重处理：direct 直接合并 / organize LLM 整理，处理后重建索引并重扫。"""
+        """执行去重处理：LLM 整理（organize）模式，处理后重建索引并重扫。"""
         from aiohttp import web
 
         if not self._web_check_auth(request):
@@ -2090,7 +2090,6 @@ class PromptJournalPlugin(MaiBotPlugin):
 
         body = await self._web_read_body(request)
         nb_name = str(body.get("notebook", "") or "").strip() or "default"
-        mode = str(body.get("mode", "direct") or "").strip() or "direct"
         threshold = 0.92
         try:
             threshold = float(body.get("threshold", 0.92))
@@ -2109,71 +2108,39 @@ class PromptJournalPlugin(MaiBotPlugin):
             entries = nb.load_notes()
             id_set = {e["id"] for e in entries}
 
-            if mode == "organize":
-                # LLM 整理：删除整组原条目，写入整理后的新条目
-                delete_ids_raw = body.get("delete_ids", [])
-                if not isinstance(delete_ids_raw, list) or not delete_ids_raw:
-                    return web.json_response({"error": "delete_ids 不能为空"}, status=400)
-                delete_ids = {str(d or "").strip() for d in delete_ids_raw if str(d or "").strip()}
-                if not delete_ids or not delete_ids <= id_set:
-                    return web.json_response({"error": "delete_ids 中存在不存在的条目"}, status=400)
+            # LLM 整理：删除整组原条目，写入整理后的新条目
+            delete_ids_raw = body.get("delete_ids", [])
+            if not isinstance(delete_ids_raw, list) or not delete_ids_raw:
+                return web.json_response({"error": "delete_ids 不能为空"}, status=400)
+            delete_ids = {str(d or "").strip() for d in delete_ids_raw if str(d or "").strip()}
+            if not delete_ids or not delete_ids <= id_set:
+                return web.json_response({"error": "delete_ids 中存在不存在的条目"}, status=400)
 
-                new_entries_raw = body.get("new_entries", [])
-                if not isinstance(new_entries_raw, list) or not new_entries_raw:
-                    return web.json_response({"error": "new_entries 不能为空"}, status=400)
-                new_entries: list[dict[str, Any]] = []
-                for item in new_entries_raw:
-                    if not isinstance(item, dict):
-                        continue
-                    en = str(item.get("en", "") or "").strip()
-                    zh = str(item.get("zh", "") or "").strip()
-                    note = str(item.get("note", "") or "").strip()
-                    if not en or not zh:
-                        continue
-                    new_entries.append({"en": en, "zh": zh, "note": note})
-                if not new_entries:
-                    return web.json_response({"error": "new_entries 没有有效条目（en/zh 必填）"}, status=400)
+            new_entries_raw = body.get("new_entries", [])
+            if not isinstance(new_entries_raw, list) or not new_entries_raw:
+                return web.json_response({"error": "new_entries 不能为空"}, status=400)
+            new_entries: list[dict[str, Any]] = []
+            for item in new_entries_raw:
+                if not isinstance(item, dict):
+                    continue
+                en = str(item.get("en", "") or "").strip()
+                zh = str(item.get("zh", "") or "").strip()
+                note = str(item.get("note", "") or "").strip()
+                if not en or not zh:
+                    continue
+                new_entries.append({"en": en, "zh": zh, "note": note})
+            if not new_entries:
+                return web.json_response({"error": "new_entries 没有有效条目（en/zh 必填）"}, status=400)
 
-                base_ts_ms = int(time.time() * 1000)
-                now = time.time()
-                fresh_entries = [
-                    {"id": scramble_id(base_ts_ms + idx), "en": e["en"], "zh": e["zh"], "note": e["note"], "ts": now}
-                    for idx, e in enumerate(new_entries)
-                ]
+            base_ts_ms = int(time.time() * 1000)
+            now = time.time()
+            fresh_entries = [
+                {"id": scramble_id(base_ts_ms + idx), "en": e["en"], "zh": e["zh"], "note": e["note"], "ts": now}
+                for idx, e in enumerate(new_entries)
+            ]
 
-                kept_entries = [e for e in entries if e.get("id") not in delete_ids]
-                final_entries = kept_entries + fresh_entries
-            else:
-                # direct：保留指定条目，合并其余备注，删除其余
-                keep_id = str(body.get("keep_id", "") or "").strip()
-                delete_ids_raw = body.get("delete_ids", [])
-                if not isinstance(delete_ids_raw, list):
-                    delete_ids_raw = []
-                delete_ids = {str(d or "").strip() for d in delete_ids_raw if str(d or "").strip()}
-                if not keep_id or not delete_ids:
-                    return web.json_response({"error": "keep_id 和 delete_ids 不能为空"}, status=400)
-
-                merged_notes: list[str] = []
-                indices_to_delete: set[int] = set()
-                keep_idx = None
-                for i, entry in enumerate(entries):
-                    if entry.get("id") == keep_id:
-                        keep_idx = i
-                    elif entry.get("id") in delete_ids:
-                        indices_to_delete.add(i)
-                        if entry.get("note"):
-                            merged_notes.append(entry["note"])
-                if keep_idx is None:
-                    return web.json_response({"error": "未找到 keep_id 对应的条目"}, status=404)
-                if not indices_to_delete:
-                    return web.json_response({"error": "未找到要删除的条目"}, status=400)
-
-                if merged_notes:
-                    existing_note = entries[keep_idx].get("note", "")
-                    parts = [p for p in [existing_note] + merged_notes if p.strip()]
-                    entries[keep_idx]["note"] = " | ".join(parts)
-
-                final_entries = [e for i, e in enumerate(entries) if i not in indices_to_delete]
+            kept_entries = [e for e in entries if e.get("id") not in delete_ids]
+            final_entries = kept_entries + fresh_entries
 
             # 只写源文件，不动 cache/embeddings；随后增量重建索引（会自动补嵌变更条目）
             json_str = "\n".join(json.dumps(e, ensure_ascii=False) for e in final_entries)
@@ -2213,6 +2180,10 @@ class PromptJournalPlugin(MaiBotPlugin):
         nb_name = str(body.get("notebook", "") or "").strip() or "default"
         requirement = str(body.get("requirement", "") or "").strip()
         session_id = str(body.get("session_id", "") or "").strip()
+
+        # 首轮（无 session_id）必须提供操作要求，防止空要求空跑 LLM
+        if not session_id and not requirement:
+            return web.json_response({"error": "操作要求不能为空"}, status=400)
 
         nb = self._get_notebook(nb_name)
         if nb is None:

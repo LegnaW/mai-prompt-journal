@@ -20,7 +20,7 @@
 - 4 个 LLM 工具：`add_aidraw_notes` / `read_aidraw_notes` / `modify_aidraw_note` / `delete_aidraw_note`
 - 7 个管理员指令：`/mpj add|search|modify|delete|refresh|rebuild|help`
 - 1 个嵌入式 WebUI（aiohttp 独立端口，默认 8010，可选密码）
-- WebUI 去重功能：语义扫描 → 直接合并 / LLM 整理（可配置任务名与系统提示词）
+- WebUI 去重功能：语义扫描 → LLM 整理（可配置任务名与系统提示词）
 - 1 个 WebUI 首页 HomeCard
 
 ## 核心文件
@@ -124,15 +124,15 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 - `GET /api/dedup/scan?notebook=&threshold=`：L2 归一化 → N×N 余弦相似度矩阵 → 贪心聚类（`_scan_duplicates`）。
 - 阈值范围 0.5~0.99（后端钳制 `max(0.5, min(0.99, ...))`），WebUI 滑块 min 同步为 0.5。
 
-### 两种处理模式（`POST /api/dedup/resolve`）
-- **direct 直接合并**：保留 `keep_id`，删除其余，被删条目 note 用 `" | "` 并入保留条目。
-- **organize LLM 整理**：删除整组原条目，写入前端回传的 `new_entries`（各生成新 `scramble_id` + `ts`）。
+### 处理方式（`POST /api/dedup/resolve`）
+- **organize LLM 整理**（唯一模式）：删除整组原条目，写入前端回传的 `new_entries`（各生成新 `scramble_id` + `ts`）。
   - 预览端点 `POST /api/dedup/organize_preview`：组内条目 + 每组一个"整理意见"输入框（`requirement`，前端提交该组自己的框内容）→ LLM 返回 `{reason, entries:[...]}` → 展示给用户确认后再执行。
   - LLM 可能把一组整理成 1~N 条（不只 1 条），并返回整理理由。
+- 组内每条目带**修改 / 删除**按钮（`startDedupEdit`/`saveDedupEdit`/`doDedupDelete`），走既有 `/api/modify`、`/api/delete`，保存/删除后调 `doDedupScan()` 重新扫描刷新列表。
 
 ### 关键：合并后必须重建索引 + 重扫（勿回退）
 `_web_dedup_resolve` 处理流程（全程在 `self._lock` 内）：
-1. 计算 `final_entries`（direct / organize 两种模式）
+1. 计算 `final_entries`（保留未删条目 + LLM 整理的新条目）
 2. **只写 `notes_path`（源文件），不动 cache/embeddings**
 3. 调 `_rebuild_notebook(nb)` 增量重建（未变条目按 content_hash 复用向量，变更/新增自动补嵌）
 4. `_scan_duplicates(nb.load_notes(), nb.load_embeddings(), threshold)` 重扫，返回新 groups
@@ -158,7 +158,7 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 
 - 调用 `_direct_chat(messages)`，`messages = [system, user]`，系统提示词放在 message list 里。
 - 内置系统提示词要点：修正过度安全拒绝（绘图标签可能敏感，禁止拒绝/省略/软化）、限定输出严格 JSON（`{"reason","entries":[{en,zh,note}]}`）、明确 entries 允许 1~N 条（防止模型误以为只能输出 1 条）、禁止强行合并丢信息。
-- 解析用 `_extract_json`（剥代码围栏 + 括号配对取首个 JSON 对象），失败返回 502 让前端重试或改直接合并。
+- 解析用 `_extract_json`（剥代码围栏 + 括号配对取首个 JSON 对象），失败返回 502 让前端重试。
 
 ### 操作数据库（`config.toml` `[organize_db]`，多轮会话 + 后台任务）
 `enabled` / `max_iterations` / `search_limit` / `system_prompt`（空 = 内置默认）。功能名用"操作"而非"整理"（可 create/update/delete，含导入新内容）。
