@@ -20,8 +20,8 @@
       <label>笔记本:</label>
       <select id="dedupNotebook" class="notebook-select"><option value="default">default</option></select>
       <label>阈值:</label>
-      <input type="range" id="dedupThreshold" min="0.5" max="0.99" step="0.01" value="0.92" style="flex:0 0 120px;" oninput="document.getElementById('thresholdValue').textContent=this.value">
-      <span id="thresholdValue">0.92</span>
+      <input type="range" id="dedupThreshold" min="0.5" max="0.99" step="0.01" value="0.85" style="flex:0 0 120px;" oninput="document.getElementById('thresholdValue').textContent=this.value">
+      <span id="thresholdValue">0.85</span>
       <button class="btn" onclick="doDedupScan()">扫描</button>
     </div>
     <div id="dedupResults"></div>

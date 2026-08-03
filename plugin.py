@@ -183,7 +183,7 @@ class PluginSectionConfig(PluginConfigBase):
         json_schema_extra={"label": "启用插件", "hint": "是否启用本插件", "order": 0},
     )
     config_version: str = Field(
-        default="2.2.1",
+        default="2.3.0",
         description="配置版本",
         json_schema_extra={"label": "配置版本", "hint": "当前配置的版本号，一般无需修改", "order": 1},
     )
@@ -224,6 +224,35 @@ class JournalConfig(PluginConfigBase):
             "label": "允许 LLM 写入",
             "hint": "关闭后禁用 add/modify/delete 三个写入工具，麦麦只读笔记本；管理员 /mpj 命令与 WebUI 不受影响",
             "order": 3,
+        },
+    )
+    dedup_check_enabled: bool = Field(
+        default=True,
+        description="add/modify 写入前是否做重复检测",
+        json_schema_extra={
+            "label": "写入去重检测",
+            "hint": "add/modify 写入前检测是否与已有笔记重复，重复则拒绝写入（LLM 工具直接拒绝；/mpj 指令需 /mpj confirm 确认）",
+            "order": 4,
+        },
+    )
+    dedup_check_all_notebooks: bool = Field(
+        default=False,
+        description="去重检测是否检测所有笔记本",
+        json_schema_extra={
+            "label": "检测所有笔记本",
+            "hint": "开启则跨所有笔记本检测重复；关闭只检测目标笔记本",
+            "order": 5,
+        },
+    )
+    dedup_check_threshold: float = Field(
+        default=0.85,
+        ge=0.5,
+        le=0.99,
+        description="写入去重检测相似度阈值",
+        json_schema_extra={
+            "label": "去重检测阈值",
+            "hint": "相似度超过该值的笔记会被判为重复（与 WebUI 去重阈值口径一致）",
+            "order": 6,
         },
     )
 
@@ -674,6 +703,8 @@ class PromptJournalPlugin(MaiBotPlugin):
         self._organize_sessions: dict[str, dict[str, Any]] = {}
         self._organize_tasks: dict[str, dict[str, Any]] = {}
         self._tasks: dict[str, dict[str, Any]] = {}
+        # /mpj add/modify 检测到重复时待用户确认的写入操作（内存态，重启即失效）
+        self._pending_confirms: dict[str, dict[str, Any]] = {}
 
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self._imports_dir.mkdir(parents=True, exist_ok=True)
@@ -905,26 +936,70 @@ class PromptJournalPlugin(MaiBotPlugin):
             if embeddings is None:
                 return {"name": "add_aidraw_notes", "content": "写入失败：embedding 服务不可用"}
 
-            nb.append_entries(valid_entries, embeddings)
-            nb.update_md5()
+            # 写入去重检测：命中重复的条目拒绝写入，其余照常写入
+            rejected: list[dict[str, Any]] = []
+            accepted_indices: list[int] = []
+            if self.config.journal.dedup_check_enabled:
+                notebooks_to_check = self._pick_dedup_notebooks(nb)
+                threshold = float(self.config.journal.dedup_check_threshold)
+                for idx, entry in enumerate(valid_entries):
+                    matches = await self._find_duplicate_matches(embeddings[idx], notebooks_to_check, threshold)
+                    if matches:
+                        rejected.append(
+                            {
+                                "en": entry["en"],
+                                "zh": entry["zh"],
+                                "note": entry["note"],
+                                "matches": matches,
+                            }
+                        )
+                        self.ctx.logger.warning(
+                            f"add_aidraw_notes 拒绝写入重复条目: {entry['en']} / {entry['zh']} "
+                            f"(匹配 {len(matches)} 条)"
+                        )
+                    else:
+                        accepted_indices.append(idx)
+            else:
+                accepted_indices = list(range(len(valid_entries)))
+
+            accepted_entries: list[dict[str, Any]] = []
+            if accepted_indices:
+                accepted_entries = [valid_entries[i] for i in accepted_indices]
+                accepted_emb = embeddings[accepted_indices]
+                nb.append_entries(accepted_entries, accepted_emb)
+                nb.update_md5()
 
             count = nb.count_notes()
-            parts = [f"成功写入 {len(valid_entries)} 条笔记到 {nb_name}"]
-            if skipped:
-                parts.append(f"（跳过 {skipped} 条无效数据）")
-            parts.append(f"，{nb_name} 当前共 {count} 条")
-            for e in valid_entries:
-                full = f"{e['en']} / {e['zh']}" + (f" — {e['note']}" if e["note"] else "")
-                shown = full if len(full) <= 25 else full[:25] + "…"
-                parts.append(f"\n- ID: {e['id']} | 内容: {shown}")
+            parts: list[str] = []
+            if accepted_entries:
+                parts.append(f"成功写入 {len(accepted_entries)} 条笔记到 {nb_name}")
+                if skipped:
+                    parts.append(f"（跳过 {skipped} 条无效数据）")
+                parts.append(f"，{nb_name} 当前共 {count} 条")
+                for e in accepted_entries:
+                    full = f"{e['en']} / {e['zh']}" + (f" — {e['note']}" if e["note"] else "")
+                    shown = full if len(full) <= 25 else full[:25] + "…"
+                    parts.append(f"\n- ID: {e['id']} | 内容: {shown}")
+            if rejected:
+                parts.append(f"\n以下 {len(rejected)} 条笔记因与已有笔记重复度过高被拒绝写入：")
+                for r in rejected:
+                    parts.append(f"- {r['en']} / {r['zh']} 匹配到:")
+                    for m in r["matches"]:
+                        parts.append(
+                            f"    [{m['notebook']}/{m['id']}] {m['en']} / {m['zh']}"
+                            f" (相似度 {m['score']:.2f})"
+                        )
+            if not accepted_entries:
+                parts.append("本次没有写入任何笔记")
             msg = "".join(parts)
             self.ctx.logger.info(msg)
             return {
                 "name": "add_aidraw_notes",
                 "content": msg,
                 "results": [
-                    {"id": e["id"], "en": e["en"], "zh": e["zh"], "note": e["note"]} for e in valid_entries
+                    {"id": e["id"], "en": e["en"], "zh": e["zh"], "note": e["note"]} for e in accepted_entries
                 ],
+                "rejected": rejected,
             }
 
     # ============================================================
@@ -1118,23 +1193,41 @@ class PromptJournalPlugin(MaiBotPlugin):
             # 加载向量
             embeddings = nb.load_embeddings()
 
-            # 内容变化时重新 embed
+            # 内容变化时重新 embed（同时用于去重检测与向量更新）
             if embeddings is not None and old_hash != new_hash and len(embeddings) > target_idx:
                 emb_text = self._build_embedding_text(entry["en"], entry["zh"], entry["note"])
                 new_vec = await self._embed_single(emb_text)
-                if new_vec is not None:
-                    emb_f16 = embeddings.astype(np.float16)
-                    if emb_f16.shape[1] == len(new_vec):
-                        emb_f16[target_idx] = new_vec.astype(np.float16)
-                        embeddings = emb_f16
-                    else:
-                        # 维度不匹配，需要重建
-                        self.ctx.logger.warning(
-                            f"向量维度不匹配 (旧={emb_f16.shape[1]}, 新={len(new_vec)})，"
-                            f"修改后需要执行 /mpj rebuild"
-                        )
-                else:
+                if new_vec is None:
                     return {"name": "modify_aidraw_note", "content": "修改失败：embedding 服务不可用"}
+
+                # 写入去重检测：新内容与已有笔记重复则拒绝修改（排除自身）
+                if self.config.journal.dedup_check_enabled:
+                    notebooks_to_check = self._pick_dedup_notebooks(nb)
+                    threshold = float(self.config.journal.dedup_check_threshold)
+                    matches = await self._find_duplicate_matches(
+                        new_vec, notebooks_to_check, threshold, exclude_id=clean_id
+                    )
+                    if matches:
+                        lines = [
+                            f"修改被拒绝：新内容与已有笔记重复度过高（匹配 {len(matches)} 条），"
+                            "未写入。匹配笔记："
+                        ]
+                        lines.append(self._format_matches(matches))
+                        return {
+                            "name": "modify_aidraw_note",
+                            "content": "\n".join(lines),
+                        }
+
+                emb_f16 = embeddings.astype(np.float16)
+                if emb_f16.shape[1] == len(new_vec):
+                    emb_f16[target_idx] = new_vec.astype(np.float16)
+                    embeddings = emb_f16
+                else:
+                    # 维度不匹配，需要重建
+                    self.ctx.logger.warning(
+                        f"向量维度不匹配 (旧={emb_f16.shape[1]}, 新={len(new_vec)})，"
+                        f"修改后需要执行 /mpj rebuild"
+                    )
 
             nb.rewrite_all(entries, embeddings)
             nb.update_md5()
@@ -1401,6 +1494,25 @@ class PromptJournalPlugin(MaiBotPlugin):
                 await self.ctx.send.text("添加失败：embedding 服务不可用", stream_id)
                 return True, "", True
 
+            # 写入去重检测：命中重复则不写入，转为待确认
+            if self.config.journal.dedup_check_enabled:
+                notebooks_to_check = self._pick_dedup_notebooks(nb)
+                threshold = float(self.config.journal.dedup_check_threshold)
+                matches = await self._find_duplicate_matches(emb, notebooks_to_check, threshold)
+                if matches:
+                    token = self._store_pending_confirm(
+                        {"type": "add", "notebook": nb_name, "en": en, "zh": zh, "note": note}
+                    )
+                    lines = [
+                        "检测到与已有笔记重复度过高，本次未写入。匹配笔记：",
+                        self._format_matches(matches),
+                        "",
+                        f"如确认要写入，请发送：/mpj confirm {token}",
+                    ]
+                    msg = "\n".join(lines)
+                    await self.ctx.send.text(msg, stream_id)
+                    return True, msg, True
+
             nb.append_entries([entry], emb.reshape(1, -1))
             nb.update_md5()
 
@@ -1541,6 +1653,31 @@ class PromptJournalPlugin(MaiBotPlugin):
                 emb_text = self._build_embedding_text(entry["en"], entry["zh"], entry["note"])
                 new_vec = await self._embed_single(emb_text)
                 if new_vec is not None:
+                    # 写入去重检测：新内容与已有笔记重复则转为待确认（排除自身）
+                    if self.config.journal.dedup_check_enabled:
+                        notebooks_to_check = self._pick_dedup_notebooks(nb)
+                        threshold = float(self.config.journal.dedup_check_threshold)
+                        matches = await self._find_duplicate_matches(
+                            new_vec, notebooks_to_check, threshold, exclude_id=note_id
+                        )
+                        if matches:
+                            token = self._store_pending_confirm(
+                                {
+                                    "type": "modify",
+                                    "notebook": nb_name,
+                                    "note_id": note_id,
+                                    "updates": updates,
+                                }
+                            )
+                            lines = [
+                                "检测到修改后的内容与已有笔记重复度过高，本次未修改。匹配笔记：",
+                                self._format_matches(matches),
+                                "",
+                                f"如确认要修改，请发送：/mpj confirm {token}",
+                            ]
+                            msg = "\n".join(lines)
+                            await self.ctx.send.text(msg, stream_id)
+                            return True, msg, True
                     emb_f16 = embeddings.astype(np.float16)
                     if emb_f16.shape[1] == len(new_vec):
                         emb_f16[target_idx] = new_vec.astype(np.float16)
@@ -1608,6 +1745,150 @@ class PromptJournalPlugin(MaiBotPlugin):
         count = nb.count_notes()
         await self.ctx.send.text(f"已删除笔记 {note_id}（笔记本: {nb_name}），剩余 {count} 条", stream_id)
         return True, "", True
+
+    # ============================================================
+    # 管理员命令：/mpj confirm
+    # ============================================================
+
+    @Command(
+        "mpj_confirm",
+        description="确认写入被去重检测拦截的笔记",
+        pattern=r"^/mpj\s+confirm\s+(.+)$",
+    )
+    async def handle_cmd_confirm(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, bool]:
+        user_id = str(kwargs.get("user_id", "") or "").strip()
+        if not self._is_admin(user_id):
+            return True, "", False
+
+        matched_groups = kwargs.get("matched_groups", {})
+        token = str(matched_groups.get(1, "") or "").strip()
+        if not token:
+            await self.ctx.send.text("用法: /mpj confirm <确认码>", stream_id)
+            return True, "", True
+
+        self._evict_pending_confirms()
+        pending = self._pending_confirms.pop(token, None)
+        if pending is None:
+            await self.ctx.send.text("确认码无效或已过期，请重新执行原命令", stream_id)
+            return True, "", True
+
+        nb_name = str(pending.get("notebook", "") or "").strip() or "default"
+        nb = self._get_notebook(nb_name)
+        if nb is None:
+            await self.ctx.send.text(f"笔记本 '{nb_name}' 不存在", stream_id)
+            return True, "", True
+
+        async with self._lock:
+            if not nb.check_consistency():
+                await self.ctx.send.text(f"笔记本 '{nb_name}' 索引失效，请执行 /mpj rebuild", stream_id)
+                return True, "", True
+
+            if pending["type"] == "add":
+                base_ts_ms = int(time.time() * 1000)
+                now = time.time()
+                en = str(pending.get("en", "") or "").strip()
+                zh = str(pending.get("zh", "") or "").strip()
+                note = str(pending.get("note", "") or "").strip()
+                if not en or not zh:
+                    await self.ctx.send.text("确认的操作数据无效（en/zh 为空）", stream_id)
+                    return True, "", True
+                entry = {"id": scramble_id(base_ts_ms), "en": en, "zh": zh, "note": note, "ts": now}
+                emb_text = self._build_embedding_text(en, zh, note)
+                emb = await self._embed_single(emb_text)
+                if emb is None:
+                    await self.ctx.send.text("写入失败：embedding 服务不可用", stream_id)
+                    return True, "", True
+                nb.append_entries([entry], emb.reshape(1, -1))
+                nb.update_md5()
+                count = nb.count_notes()
+                msg = f"已确认写入 {nb_name}（当前共 {count} 条）：{en} / {zh}"
+                if note:
+                    msg += f" — {note}"
+                await self.ctx.send.text(msg, stream_id)
+                return True, msg, True
+
+            if pending["type"] == "modify":
+                note_id = str(pending.get("note_id", "") or "").strip()
+                updates = pending.get("updates") or {}
+                entries = nb.load_notes()
+                target_idx = None
+                for i, entry in enumerate(entries):
+                    if entry.get("id") == note_id:
+                        target_idx = i
+                        break
+                if target_idx is None:
+                    await self.ctx.send.text(f"未找到笔记 ID: {note_id}（笔记本: {nb_name}）", stream_id)
+                    return True, "", True
+                entry = entries[target_idx]
+                old_hash = self._compute_content_hash(entry["en"], entry["zh"], entry["note"])
+                for key in ("en", "zh", "note"):
+                    if key in updates:
+                        entry[key] = str(updates[key] or "").strip()
+                entries[target_idx] = entry
+                new_hash = self._compute_content_hash(entry["en"], entry["zh"], entry["note"])
+                embeddings = nb.load_embeddings()
+                if embeddings is not None and old_hash != new_hash and len(embeddings) > target_idx:
+                    emb_text = self._build_embedding_text(entry["en"], entry["zh"], entry["note"])
+                    new_vec = await self._embed_single(emb_text)
+                    if new_vec is not None:
+                        emb_f16 = embeddings.astype(np.float16)
+                        if emb_f16.shape[1] == len(new_vec):
+                            emb_f16[target_idx] = new_vec.astype(np.float16)
+                            embeddings = emb_f16
+                nb.rewrite_all(entries, embeddings)
+                nb.update_md5()
+                await self.ctx.send.text(f"已确认修改笔记 {note_id}（笔记本: {nb_name}）", stream_id)
+                return True, "", True
+
+        await self.ctx.send.text("确认的操作类型无效", stream_id)
+        return True, "", True
+
+    # ============================================================
+    # 管理员命令：/mpj new
+    # ============================================================
+
+    @Command(
+        "mpj_new",
+        description="创建空白笔记本",
+        pattern=r"^/mpj\s+new\s+(.+)$",
+    )
+    async def handle_cmd_new(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, bool]:
+        import re as _re
+
+        user_id = str(kwargs.get("user_id", "") or "").strip()
+        if not self._is_admin(user_id):
+            return True, "", False
+
+        matched_groups = kwargs.get("matched_groups", {})
+        name = str(matched_groups.get(1, "") or "").strip()
+        if not name:
+            await self.ctx.send.text("用法: /mpj new <笔记本名>", stream_id)
+            return True, "", True
+        if name == "default" or name == "tmp":
+            await self.ctx.send.text(f"笔记本名 '{name}' 不可用", stream_id)
+            return True, "", True
+        if not _re.match(r"^[A-Za-z0-9_\-\u4e00-\u9fff]+$", name):
+            await self.ctx.send.text("笔记本名称只能包含中文/字母/数字/下划线/连字符", stream_id)
+            return True, "", True
+        if self._get_notebook(name) is not None:
+            await self.ctx.send.text(f"笔记本 '{name}' 已存在", stream_id)
+            return True, "", True
+
+        async with self._lock:
+            nb = Notebook(name, self._data_dir)
+            nb.notes_path.parent.mkdir(parents=True, exist_ok=True)
+            nb.notes_path.write_text("", encoding="utf-8")
+            try:
+                await self._rebuild_notebook(nb)
+            except Exception as exc:
+                self.ctx.logger.error(f"笔记本 {name} 初始化失败: {exc}", exc_info=True)
+                await self.ctx.send.text(f"创建失败：{exc}", stream_id)
+                return True, "", True
+            self._notebooks = self._discover_notebooks()
+
+        msg = f"已创建空白笔记本 {name}，可开始添加笔记（如 /mpj add 英文|中文 -n {name}）"
+        await self.ctx.send.text(msg, stream_id)
+        return True, msg, True
 
     # ============================================================
     # 指令参数解析
@@ -2056,9 +2337,9 @@ class PromptJournalPlugin(MaiBotPlugin):
             return web.json_response({"error": "unauthorized"}, status=401)
 
         nb_name = str(request.query.get("notebook", "default") or "default").strip()
-        threshold = 0.92
+        threshold = 0.85
         try:
-            threshold = float(request.query.get("threshold", 0.92))
+            threshold = float(request.query.get("threshold", 0.85))
         except (ValueError, TypeError):
             pass
         threshold = max(0.5, min(0.99, threshold))
@@ -2122,6 +2403,78 @@ class PromptJournalPlugin(MaiBotPlugin):
 
         return groups
 
+    def _pick_dedup_notebooks(self, target_nb: Notebook) -> list[Notebook]:
+        """选择写入去重检测的笔记本集合。
+
+        配置 dedup_check_all_notebooks 开启时跨所有笔记本检测（含目标笔记本）；
+        关闭时只检测目标笔记本。tmp 临时笔记本不参与。
+        """
+        if self.config.journal.dedup_check_all_notebooks:
+            return list(self._notebooks.values())
+        return [target_nb]
+
+    async def _find_duplicate_matches(
+        self,
+        query_vec: np.ndarray,
+        notebooks: list[Notebook],
+        threshold: float,
+        exclude_id: str = "",
+    ) -> list[dict[str, Any]]:
+        """在给定笔记本中查找与 query_vec 相似度 >= threshold 的条目（纯向量余弦）。
+
+        返回 [{notebook, id, en, zh, note, score}, ...]，按相似度降序。
+        跳过索引失效/向量与条目不一致的笔记本；exclude_id 的条目不参与匹配。
+        口径与 _scan_duplicates 一致：L2 归一化后的余弦相似度。
+        """
+        threshold = max(0.5, min(0.99, float(threshold)))
+        query_f32 = np.asarray(query_vec, dtype=np.float32).reshape(-1)
+        query_norm = np.linalg.norm(query_f32)
+        if query_norm <= 1e-8:
+            return []
+        query_normed = query_f32 / query_norm
+
+        matches: list[dict[str, Any]] = []
+        for nb in notebooks:
+            if not nb.check_consistency():
+                continue
+            entries = nb.load_notes()
+            embeddings = nb.load_embeddings()
+            if embeddings is None or len(embeddings) != len(entries):
+                continue
+            emb_f32 = embeddings.astype(np.float32)
+            norms = np.linalg.norm(emb_f32, axis=1)
+            safe_norms = np.where(norms > 1e-8, norms, 1.0)
+            scores = (emb_f32 @ query_normed) / safe_norms
+            for i in range(len(entries)):
+                if exclude_id and str(entries[i].get("id", "")) == str(exclude_id):
+                    continue
+                score = float(scores[i])
+                if score >= threshold:
+                    e = entries[i]
+                    matches.append(
+                        {
+                            "notebook": nb.name,
+                            "id": e["id"],
+                            "en": e["en"],
+                            "zh": e["zh"],
+                            "note": e["note"],
+                            "score": round(score, 4),
+                        }
+                    )
+        matches.sort(key=lambda m: m["score"], reverse=True)
+        return matches
+
+    @staticmethod
+    def _format_matches(matches: list[dict[str, Any]]) -> str:
+        """把匹配到的重复笔记格式化为多行文本。"""
+        lines = []
+        for m in matches:
+            note_part = f" — {m['note']}" if m.get("note") else ""
+            lines.append(
+                f'[{m["notebook"]}/{m["id"]}] {m["en"]} / {m["zh"]}{note_part} (相似度 {m["score"]:.2f})'
+            )
+        return "\n".join(lines)
+
     async def _web_organize_preview(self, request: Any) -> Any:
         """调用 LLM 整理一组重复笔记，返回预览结果（不修改数据）。"""
         from aiohttp import web
@@ -2161,9 +2514,9 @@ class PromptJournalPlugin(MaiBotPlugin):
 
         body = await self._web_read_body(request)
         nb_name = str(body.get("notebook", "") or "").strip() or "default"
-        threshold = 0.92
+        threshold = 0.85
         try:
-            threshold = float(body.get("threshold", 0.92))
+            threshold = float(body.get("threshold", 0.85))
         except (ValueError, TypeError):
             pass
         threshold = max(0.5, min(0.99, threshold))
@@ -3311,6 +3664,27 @@ class PromptJournalPlugin(MaiBotPlugin):
         if not admin_users:
             return False
         return user_id in admin_users
+
+    def _store_pending_confirm(self, data: dict[str, Any]) -> str:
+        """登记一条待确认的写入操作，返回确认码（token）。"""
+        self._evict_pending_confirms()
+        token = uuid.uuid4().hex
+        data["created_at"] = time.time()
+        self._pending_confirms[token] = data
+        return token
+
+    def _evict_pending_confirms(self) -> None:
+        """待确认操作 TTL 600s 且上限 50，防止内存膨胀。"""
+        ttl = 600.0
+        limit = 50
+        now = time.time()
+        stale = [t for t, d in self._pending_confirms.items() if now - d["created_at"] > ttl]
+        for t in stale:
+            self._pending_confirms.pop(t, None)
+        if len(self._pending_confirms) > limit:
+            oldest = sorted(self._pending_confirms.items(), key=lambda kv: kv[1]["created_at"])
+            for t, _ in oldest[: len(self._pending_confirms) - limit]:
+                self._pending_confirms.pop(t, None)
 
     @staticmethod
     def _build_embedding_text(en: str, zh: str, note: str) -> str:
