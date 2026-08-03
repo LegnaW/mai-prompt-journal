@@ -154,6 +154,17 @@ _ORGANIZE_DB_SEARCH_TOOL = {
 }
 
 
+def _split_txt(text: str) -> list[str]:
+    """按两个及以上连续换行切分 txt，每段为一个块。
+
+    \\n\\n 切分；\\n\\n\\n 也只切一次；单个 \\n 不切分。
+    """
+    import re
+
+    parts = re.split(r"\n{2,}", text or "")
+    return [p.strip() for p in parts if p.strip()]
+
+
 # ============================================================
 # 配置模型
 # ============================================================
@@ -172,7 +183,7 @@ class PluginSectionConfig(PluginConfigBase):
         json_schema_extra={"label": "启用插件", "hint": "是否启用本插件", "order": 0},
     )
     config_version: str = Field(
-        default="2.1.0",
+        default="2.2.0",
         description="配置版本",
         json_schema_extra={"label": "配置版本", "hint": "当前配置的版本号，一般无需修改", "order": 1},
     )
@@ -328,6 +339,17 @@ class OrganizeDbConfig(PluginConfigBase):
             "rows": 8,
         },
     )
+    batch_import_prompt: str = Field(
+        default="你只能写入/删除/修改`{temp-journal}`中的内容，不要尝试动其他的笔记本。",
+        description="批量导入追加提示词（追加在操作数据库系统提示词之后）",
+        json_schema_extra={
+            "label": "批量导入追加提示词",
+            "hint": "txt 批量导入时追加在系统提示词后的约束文本；{temp-journal} 会被替换为临时笔记本名。一般情况下请勿乱动此项目。",
+            "order": 4,
+            "x-widget": "textarea",
+            "rows": 4,
+        },
+    )
 
 
 class DirectLlmConfig(PluginConfigBase):
@@ -443,9 +465,11 @@ class Notebook:
       {name}.index.meta   索引元信息（md5、条目数、构建时间）
     """
 
-    def __init__(self, name: str, base_dir: Path) -> None:
+    def __init__(self, name: str, base_dir: Path, custom_dir: Path | None = None) -> None:
         self.name = name
-        if name == "default":
+        if custom_dir is not None:
+            self._dir = custom_dir
+        elif name == "default":
             self._dir = base_dir
         else:
             self._dir = base_dir / "imports"
@@ -654,6 +678,14 @@ class PromptJournalPlugin(MaiBotPlugin):
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self._imports_dir.mkdir(parents=True, exist_ok=True)
 
+        # 批量导入临时笔记本（固定名 tmp，独立目录，不参与发现逻辑）
+        self._tmp_import_dir: Path = self._data_dir / "tmp_import"
+        self._tmp_import_dir.mkdir(parents=True, exist_ok=True)
+        self._tmp_nb: Notebook = Notebook("tmp", self._data_dir, custom_dir=self._tmp_import_dir)
+        self._tmp_log_path: Path = self._tmp_import_dir / "import.log"
+        self._tmp_failed_path: Path = self._tmp_import_dir / "import.failed.json"
+        self._tmp_finished_path: Path = self._tmp_import_dir / ".finished"
+
         # 迁移旧格式
         self._migrate_legacy()
 
@@ -769,8 +801,10 @@ class PromptJournalPlugin(MaiBotPlugin):
         return notebooks
 
     def _get_notebook(self, name: str) -> Notebook | None:
-        """按名称获取笔记本，不存在返回 None。"""
+        """按名称获取笔记本，不存在返回 None。tmp 为批量导入临时笔记本。"""
         clean = str(name or "").strip() or "default"
+        if clean == "tmp":
+            return self._tmp_nb
         return self._notebooks.get(clean)
 
     def _list_notebook_names(self) -> str:
@@ -1640,6 +1674,15 @@ class PromptJournalPlugin(MaiBotPlugin):
             app.router.add_post("/api/refresh", self._web_refresh)
             app.router.add_post("/api/rebuild", self._web_rebuild)
             app.router.add_get("/api/tasks", self._web_tasks)
+            app.router.add_post("/api/import/preview", self._web_import_preview)
+            app.router.add_post("/api/import/start", self._web_import_start)
+            app.router.add_get("/api/import/status", self._web_import_status)
+            app.router.add_get("/api/import/tmp_notes", self._web_import_tmp_notes)
+            app.router.add_get("/api/import/log", self._web_import_log)
+            app.router.add_post("/api/import/resolve", self._web_import_resolve)
+            app.router.add_post("/api/import/cancel", self._web_import_cancel)
+            app.router.add_get("/api/import/state", self._web_import_state)
+            app.router.add_post("/api/notebooks/delete", self._web_delete_notebook)
             app.router.add_get("/api/dedup/scan", self._web_dedup_scan)
             app.router.add_post("/api/dedup/resolve", self._web_dedup_resolve)
             app.router.add_post("/api/dedup/organize_preview", self._web_organize_preview)
@@ -1970,7 +2013,9 @@ class PromptJournalPlugin(MaiBotPlugin):
         task_id = self._start_task("rebuild", label)
         if task_id is None:
             return web.json_response({"error": "已有后台任务进行中，请等待完成后再试"}, status=409)
-        asyncio.create_task(self._run_rebuild_task(task_id, force_full))
+        handle = asyncio.create_task(self._run_rebuild_task(task_id, force_full))
+        if self._tasks.get(task_id) is not None:
+            self._tasks[task_id]["handle"] = handle
         return web.json_response({"task_id": task_id})
 
     async def _run_rebuild_task(self, task_id: str, force_full: bool) -> None:
@@ -2325,8 +2370,23 @@ class PromptJournalPlugin(MaiBotPlugin):
             "finished_at": None,
             "result": None,
             "error": None,
+            "handle": None,
         }
         return task_id
+
+    def _cancel_running_task(self) -> bool:
+        """取消当前进行中的后台任务（import/rebuild），返回是否取消成功。"""
+        cancelled = False
+        for tid, task in list(self._tasks.items()):
+            if task.get("status") == "running":
+                handle = task.get("handle")
+                if handle is not None and not handle.done():
+                    handle.cancel()
+                task["status"] = "error"
+                task["error"] = "任务已取消"
+                task["finished_at"] = time.time()
+                cancelled = True
+        return cancelled
 
     def _finish_task(self, task_id: str, result: Any) -> None:
         task = self._tasks.get(task_id)
@@ -2347,7 +2407,7 @@ class PromptJournalPlugin(MaiBotPlugin):
     def _evict_tasks(self) -> None:
         """通用任务结果保留 TTL 并限制数量。"""
         ttl = 300.0
-        limit = 50
+        limit = 5
         now = time.time()
         stale = [tid for tid, t in self._tasks.items() if now - t["created_at"] > ttl]
         for tid in stale:
@@ -2365,7 +2425,510 @@ class PromptJournalPlugin(MaiBotPlugin):
             return web.json_response({"error": "unauthorized"}, status=401)
         self._evict_tasks()
         tasks = sorted(self._tasks.values(), key=lambda t: (t["status"] != "running", t["created_at"]))
-        return web.json_response({"tasks": tasks})
+        # handle 是内部 asyncio.Task 对象，不可 JSON 序列化，对外剔除
+        clean = [{k: v for k, v in t.items() if k != "handle"} for t in tasks]
+        return web.json_response({"tasks": clean})
+
+    # ============================================================
+    # txt 批量导入
+    # ============================================================
+
+    def _reset_tmp_import(self) -> None:
+        """清空临时笔记本目录，重建空 tmp 笔记本（下一轮导入开始前调用）。"""
+        if self._tmp_import_dir.exists():
+            for p in self._tmp_import_dir.iterdir():
+                if p.is_file():
+                    p.unlink()
+        self._tmp_import_dir.mkdir(parents=True, exist_ok=True)
+        nb = self._tmp_nb
+        nb.notes_path.write_text("", encoding="utf-8")
+        nb.cache_path.write_text("", encoding="utf-8")
+        nb.embeddings_path.write_bytes(b"")
+        nb.save_meta({"md5": "", "count": 0, "built_at": time.time()})
+
+    def _append_import_log(self, text: str) -> None:
+        try:
+            with self._tmp_log_path.open("a", encoding="utf-8") as f:
+                f.write(text)
+        except Exception as exc:
+            self.ctx.logger.warning(f"写入导入日志失败: {exc}")
+
+    async def _apply_ops_to_tmp(
+        self, operations: list[dict[str, Any]], reason: str
+    ) -> tuple[bool, str]:
+        """把 LLM 输出的 operations 应用到临时笔记本 tmp，重建索引。返回 (ok, error)。"""
+        nb = self._tmp_nb
+        try:
+            entries = nb.load_notes()
+            id_set = {e["id"] for e in entries}
+            validate_error = self._validate_organize_operations(operations, id_set)
+            if validate_error:
+                return False, f"方案校验失败：{validate_error}"
+
+            entries_by_id = {e["id"]: e for e in entries}
+            base_ts_ms = int(time.time() * 1000)
+            now = time.time()
+            created: list[dict[str, Any]] = []
+            for i, op in enumerate(operations):
+                op_type = str(op.get("type") or "")
+                if op_type == "create":
+                    created.append(
+                        {
+                            "id": scramble_id(base_ts_ms + i),
+                            "en": str(op.get("en", "") or "").strip(),
+                            "zh": str(op.get("zh", "") or "").strip(),
+                            "note": str(op.get("note", "") or "").strip(),
+                            "ts": now,
+                        }
+                    )
+                elif op_type == "update":
+                    target = entries_by_id.get(str(op.get("id", "") or "").strip())
+                    if target is None:
+                        return False, f"update 操作 id 不存在: {op.get('id')}"
+                    if "en" in op:
+                        target["en"] = str(op["en"] or "").strip()
+                    if "zh" in op:
+                        target["zh"] = str(op["zh"] or "").strip()
+                    if "note" in op:
+                        target["note"] = str(op["note"] or "").strip()
+                elif op_type == "delete":
+                    op_id = str(op.get("id", "") or "").strip()
+                    entries = [e for e in entries if e["id"] != op_id]
+                    entries_by_id.pop(op_id, None)
+
+            final_entries = entries + created
+            json_str = "\n".join(json.dumps(e, ensure_ascii=False) for e in final_entries)
+            if json_str:
+                json_str += "\n"
+            nb.notes_path.parent.mkdir(parents=True, exist_ok=True)
+            nb.notes_path.write_text(json_str, encoding="utf-8")
+            await self._rebuild_notebook(nb)
+            return True, ""
+        except Exception as exc:
+            self.ctx.logger.error(f"批量导入写入 tmp 失败: {exc}", exc_info=True)
+            return False, str(exc)
+
+    async def _run_import_segment(
+        self,
+        segment_text: str,
+        mode_prompt: str,
+        cfg: Any,
+        ref_names: list[str],
+        progress: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """对单段文本跑一次完整 agent 循环，返回 {ok, reason, operations, error}。"""
+        system_prompt = str(cfg.system_prompt or "").strip() or _ORGANIZE_DB_DEFAULT_SYSTEM_PROMPT
+        import_prompt = str(cfg.batch_import_prompt or "").strip()
+        if import_prompt:
+            import_prompt = import_prompt.replace("{temp-journal}", "tmp")
+            system_prompt = f"{system_prompt}\n{import_prompt}"
+
+        user_parts: list[str] = []
+        if mode_prompt:
+            user_parts.append(mode_prompt)
+        user_parts.append(f"以下是需要处理的一段文本：\n{segment_text}")
+        user_parts.append(
+            "请对临时笔记本 tmp 执行 create/update/delete 操作（只能操作 tmp，不得触碰其他笔记本），"
+            "最终输出操作方案 JSON。"
+        )
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": "\n\n".join(user_parts)},
+        ]
+
+        max_iterations = max(1, int(cfg.max_iterations or 8))
+        for _ in range(max_iterations):
+            result = await self._direct_chat(messages, tools=[_ORGANIZE_DB_SEARCH_TOOL])
+            if not isinstance(result, dict) or not result.get("success"):
+                error = result.get("error", "unknown") if isinstance(result, dict) else result
+                return {"ok": False, "error": f"LLM 调用失败：{error}"}
+
+            tool_calls = result.get("tool_calls")
+            if tool_calls:
+                api_tool_calls: list[dict[str, Any]] = []
+                for call in tool_calls:
+                    func = dict(call.get("function") or {})
+                    if isinstance(func.get("arguments"), dict):
+                        func["arguments"] = json.dumps(func["arguments"], ensure_ascii=False)
+                    api_tool_calls.append(
+                        {"id": str(call.get("id") or ""), "type": "function", "function": func}
+                    )
+                assistant_msg: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": str(result.get("content") or ""),
+                    "tool_calls": api_tool_calls,
+                }
+                if result.get("reasoning_content"):
+                    assistant_msg["reasoning_content"] = result["reasoning_content"]
+                messages.append(assistant_msg)
+                for call in tool_calls:
+                    call_id = str(call.get("id") or "")
+                    func = call.get("function") or {}
+                    name = str(func.get("name") or "")
+                    args = func.get("arguments") or {}
+                    if not isinstance(args, dict):
+                        args = {}
+                    if name == "search_notes":
+                        tool_result = await self._execute_search_notes_multi(
+                            args.get("keyword", ""), ref_names, args.get("limit", cfg.search_limit)
+                        )
+                        if progress is not None:
+                            progress.setdefault("searches", []).append(
+                                {
+                                    "keyword": str(args.get("keyword", "") or ""),
+                                    "notebook": "引用+tmp",
+                                }
+                            )
+                    else:
+                        tool_result = f"未知工具: {name}"
+                    messages.append({"role": "tool", "tool_call_id": call_id, "content": tool_result})
+                continue
+
+            response_text = str(result.get("content", "") or "").strip()
+            if not response_text:
+                return {"ok": False, "error": "LLM 返回空内容"}
+            payload = self._extract_json(response_text)
+            if payload is None:
+                return {"ok": False, "error": f"LLM 返回内容无法解析为 JSON，完整输出：\n{response_text}"}
+            raw_ops = payload.get("operations")
+            if not isinstance(raw_ops, list):
+                return {"ok": False, "error": f"LLM 返回的 operations 无效，完整输出：\n{response_text}"}
+            reason = str(payload.get("reason", "") or "").strip()
+            operations = [o for o in raw_ops if isinstance(o, dict)]
+            ok, apply_error = await self._apply_ops_to_tmp(operations, reason)
+            if not ok:
+                return {"ok": False, "error": apply_error}
+            return {"ok": True, "reason": reason, "operations": operations}
+
+        return {"ok": False, "error": "LLM 检索达到最大迭代次数"}
+
+    async def _run_import_task(
+        self, task_id: str, segments: list[str], mode_prompt: str, ref_names: list[str]
+    ) -> None:
+        cfg = self.config.organize_db
+        failed: list[dict[str, Any]] = []
+        total = len(segments)
+        try:
+            async with self._lock:
+                self._reset_tmp_import()
+                for idx, seg in enumerate(segments, 1):
+                    task = self._tasks.get(task_id)
+                    if task is not None:
+                        task["progress"] = {
+                            "total": total,
+                            "done": idx - 1,
+                            "current_index": idx,
+                            "failed_count": len(failed),
+                        }
+                    log_head = (
+                        f"\n[========== 段 {idx}/{total} ==========]\n"
+                        f"[时间] {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                        f"[用户输入]\n{seg}\n"
+                    )
+                    self._append_import_log(log_head)
+                    if mode_prompt:
+                        self._append_import_log(f"[附加提示词]\n{mode_prompt}\n")
+                    result = await self._run_import_segment(seg, mode_prompt, cfg, ref_names, task)
+                    if result.get("ok"):
+                        self._append_import_log(
+                            f"[LLM 决定与理由]\n{result.get('reason', '')}\n"
+                            f"[操作]\n{json.dumps(result.get('operations', []), ensure_ascii=False, indent=2)}\n"
+                            "[结果] 成功\n"
+                        )
+                    else:
+                        failed.append({"index": idx, "segment": seg, "error": result.get("error", "")})
+                        self._append_import_log(f"[结果] 失败：{result.get('error', '')}\n")
+                    # 每段执行后更新失败数，保证构建中进度实时准确
+                    if task is not None:
+                        task["progress"]["failed_count"] = len(failed)
+                        task["progress"]["done"] = idx
+
+            if failed:
+                err_lines = ["\n[========== 失败条目汇总 ==========]\n"]
+                for f in failed:
+                    err_lines.append(
+                        f"段 {f['index']}: {f['error']}\n--- 内容 ---\n{f['segment']}\n\n"
+                    )
+                self._append_import_log("".join(err_lines))
+
+            # 失败条目落盘，保证"等待导入"状态抗重启也能展示错误列表
+            try:
+                with self._tmp_failed_path.open("w", encoding="utf-8") as f:
+                    json.dump(failed, f, ensure_ascii=False, indent=2)
+            except Exception as exc:
+                self.ctx.logger.warning(f"写入导入失败汇总失败: {exc}")
+
+            self._finish_task(
+                task_id,
+                {
+                    "total": total,
+                    "failed_count": len(failed),
+                    "failed": failed,
+                },
+            )
+        except Exception as exc:
+            self.ctx.logger.error(f"批量导入后台任务异常: {exc}", exc_info=True)
+            self._fail_task(task_id, exc)
+        finally:
+            self._evict_tasks()
+
+    async def _web_import_preview(self, request: Any) -> Any:
+        """上传 txt → 切分 → 返回段落列表（不落盘）。"""
+        from aiohttp import web
+
+        if not self._web_check_auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        body = await self._web_read_body(request)
+        text = str(body.get("text", "") or "")
+        if not text.strip():
+            return web.json_response({"error": "文本不能为空"}, status=400)
+        segments = _split_txt(text)
+        if not segments:
+            return web.json_response({"error": "没有可导入的段落"}, status=400)
+        return web.json_response({"segments": segments, "count": len(segments)})
+
+    async def _web_import_start(self, request: Any) -> Any:
+        """启动批量导入后台任务，立即返回 task_id。"""
+        from aiohttp import web
+
+        if not self._web_check_auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        body = await self._web_read_body(request)
+        text = str(body.get("text", "") or "")
+        mode_prompt = str(body.get("mode_prompt", "") or "").strip()
+        ref_raw = body.get("ref_notebooks", [])
+        if not isinstance(ref_raw, list):
+            ref_raw = []
+        ref_names = [str(n or "").strip() for n in ref_raw if str(n or "").strip()]
+
+        segments = _split_txt(text)
+        if not segments:
+            return web.json_response({"error": "没有可导入的段落"}, status=400)
+
+        # 双重校验：预设或自定义都必须有附加提示词
+        if not mode_prompt:
+            return web.json_response({"error": "附加提示词不能为空"}, status=400)
+
+        # 校验引用笔记本存在
+        for name in ref_names:
+            if self._get_notebook(name) is None:
+                return web.json_response({"error": f"引用笔记本 '{name}' 不存在"}, status=400)
+
+        # LLM 直连配置完整
+        llm_cfg = self.config.llm
+        if not (llm_cfg.base_url and llm_cfg.api_key and llm_cfg.model):
+            return web.json_response(
+                {"error": "LLM 直连配置不完整，请填写 [llm] 的 base_url / api_key / model"}, status=400
+            )
+
+        task_id = self._start_task("import", "txt 批量导入")
+        if task_id is None:
+            return web.json_response({"error": "已有后台任务进行中，请等待完成后再试"}, status=409)
+        handle = asyncio.create_task(self._run_import_task(task_id, segments, mode_prompt, ref_names))
+        if self._tasks.get(task_id) is not None:
+            self._tasks[task_id]["handle"] = handle
+        return web.json_response({"task_id": task_id, "count": len(segments)})
+
+    async def _web_import_status(self, request: Any) -> Any:
+        """查询导入任务状态（含失败汇总）。"""
+        from aiohttp import web
+
+        if not self._web_check_auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        task_id = str(request.query.get("task_id", "") or "").strip()
+        task = self._tasks.get(task_id)
+        if task is None:
+            return web.json_response({"error": "任务不存在或已过期"}, status=404)
+        if task["status"] == "running":
+            return web.json_response({"status": "running", "progress": task["progress"]})
+        if task["status"] == "done":
+            return web.json_response({"status": "done", "result": task["result"]})
+        return web.json_response({"status": "error", "error": task.get("error", "")})
+
+    async def _web_import_tmp_notes(self, request: Any) -> Any:
+        """查看临时笔记本全部条目。"""
+        from aiohttp import web
+
+        if not self._web_check_auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        entries = self._tmp_nb.load_notes()
+        return web.json_response({"notebook": "tmp", "notes": entries, "count": len(entries)})
+
+    async def _web_import_log(self, request: Any) -> Any:
+        """下载导入日志。"""
+        from aiohttp import web
+
+        if not self._web_check_auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        if not self._tmp_log_path.exists():
+            return web.json_response({"error": "日志不存在"}, status=404)
+        text = self._tmp_log_path.read_text(encoding="utf-8", errors="replace")
+        return web.Response(
+            text=text,
+            content_type="text/plain",
+            headers={"Content-Disposition": 'attachment; filename="import.log"'},
+        )
+
+    async def _web_import_resolve(self, request: Any) -> Any:
+        """处置临时笔记本：merge 合并入已有 / create 新建 / discard 丢弃。"""
+        import shutil
+
+        from aiohttp import web
+
+        if not self._web_check_auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        body = await self._web_read_body(request)
+        action = str(body.get("action", "") or "").strip()
+        if action not in ("merge", "create", "discard"):
+            return web.json_response({"error": "action 必须是 merge/create/discard"}, status=400)
+
+        async with self._lock:
+            entries = self._tmp_nb.load_notes()
+            if action == "discard":
+                # 丢弃：清空缓存目录（含 .finished），回到未开始
+                self._reset_tmp_import()
+                return web.json_response({"success": True, "action": "discard"})
+
+            if not entries:
+                return web.json_response({"error": "临时笔记本为空，无需处置"}, status=400)
+
+            if action == "merge":
+                target = str(body.get("target_notebook", "") or "").strip() or "default"
+                nb = self._get_notebook(target)
+                if nb is None:
+                    return web.json_response({"error": f"目标笔记本 '{target}' 不存在"}, status=404)
+                if not nb.check_consistency():
+                    return web.json_response(
+                        {"error": f"笔记本 '{target}' 索引失效，请先 /mpj rebuild"}, status=400
+                    )
+                # 复用 tmp 已有向量（embedding 文本相同，维度一致），直接追加
+                embeddings = self._tmp_nb.load_embeddings()
+                if embeddings is None or len(embeddings) != len(entries):
+                    return web.json_response({"error": "临时笔记本向量不完整，无法合并"}, status=400)
+                nb.append_entries(entries, embeddings)
+                nb.update_md5()
+                # 标记导入完成（抗刷新/抗重启）
+                self._tmp_finished_path.write_text("", encoding="utf-8")
+                return web.json_response(
+                    {"success": True, "action": "merge", "target": target, "count": len(entries)}
+                )
+
+            # create：新建笔记本，复制 tmp 四个文件为 {new_name}
+            new_name = str(body.get("new_name", "") or "").strip()
+            if not new_name:
+                return web.json_response({"error": "新建笔记本必须填写名称"}, status=400)
+            if new_name == "default" or self._get_notebook(new_name) is not None:
+                return web.json_response({"error": f"笔记本 '{new_name}' 已存在"}, status=400)
+            import re as _re
+
+            if not _re.match(r"^[A-Za-z0-9_\-\u4e00-\u9fff]+$", new_name):
+                return web.json_response(
+                    {"error": "笔记本名称只能包含中文/字母/数字/下划线/连字符"}, status=400
+                )
+
+            base = self._data_dir / "imports"
+            base.mkdir(parents=True, exist_ok=True)
+            new_nb = Notebook(new_name, self._data_dir)
+            for suffix in (".jsonl", ".cache.jsonl", ".embeddings.npy", ".index.meta"):
+                src = self._tmp_import_dir / f"tmp{suffix}"
+                dst = new_nb._dir / f"{new_name}{suffix}"
+                if src.exists():
+                    shutil.copyfile(src, dst)
+            self._notebooks = self._discover_notebooks()
+            # 标记导入完成（抗刷新/抗重启）
+            self._tmp_finished_path.write_text("", encoding="utf-8")
+            return web.json_response(
+                {"success": True, "action": "create", "name": new_name, "count": len(entries)}
+            )
+
+    async def _web_import_cancel(self, request: Any) -> Any:
+        """取消当前进行中的导入任务并清空缓存目录。"""
+        from aiohttp import web
+
+        if not self._web_check_auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        cancelled = self._cancel_running_task()
+        async with self._lock:
+            self._reset_tmp_import()
+        return web.json_response({"success": True, "cancelled": cancelled})
+
+    async def _web_import_state(self, request: Any) -> Any:
+        """返回批量导入当前状态（抗刷新/抗重启）：none / building / ready / done。"""
+        from aiohttp import web
+
+        if not self._web_check_auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+
+        # 构建中：有 running 的 import 任务
+        running = [t for t in self._tasks.values() if t.get("status") == "running"]
+        if running:
+            t = running[0]
+            progress = dict(t.get("progress", {}))
+            return web.json_response(
+                {
+                    "state": "building",
+                    "progress": progress,
+                    "failed_count": progress.get("failed_count", 0),
+                }
+            )
+
+        # 已完成：存在 .finished 标记
+        if self._tmp_finished_path.exists():
+            return web.json_response({"state": "done"})
+
+        # 等待导入：tmp 有内容
+        entries = self._tmp_nb.load_notes()
+        if entries:
+            failed: list[dict[str, Any]] = []
+            if self._tmp_failed_path.exists():
+                try:
+                    failed = json.loads(self._tmp_failed_path.read_text(encoding="utf-8")) or []
+                except Exception:
+                    failed = []
+            return web.json_response(
+                {
+                    "state": "ready",
+                    "total": len(entries),
+                    "failed_count": len(failed),
+                    "failed": failed,
+                }
+            )
+
+        # 未开始
+        return web.json_response({"state": "none"})
+
+    async def _web_delete_notebook(self, request: Any) -> Any:
+        """删除一个已有的笔记本（default 与临时笔记本 tmp 不可删除）。"""
+        from aiohttp import web
+
+        if not self._web_check_auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        body = await self._web_read_body(request)
+        name = str(body.get("name", "") or "").strip()
+        if not name:
+            return web.json_response({"error": "笔记本名称不能为空"}, status=400)
+        if name == "default":
+            return web.json_response({"error": "default 笔记本不可删除"}, status=400)
+        if name == "tmp":
+            return web.json_response({"error": "临时笔记本不可在此删除"}, status=400)
+
+        nb = self._get_notebook(name)
+        if nb is None:
+            return web.json_response({"error": f"笔记本 '{name}' 不存在"}, status=404)
+
+        async with self._lock:
+            removed = 0
+            for path in (nb.notes_path, nb.cache_path, nb.embeddings_path, nb.meta_path):
+                if path.exists():
+                    try:
+                        path.unlink()
+                        removed += 1
+                    except Exception as exc:
+                        self.ctx.logger.error(f"删除文件失败 {path}: {exc}")
+            self._notebooks = self._discover_notebooks()
+
+        self.ctx.logger.info(f"已删除笔记本: {name}（删除 {removed} 个文件）")
+        return web.json_response({"success": True, "name": name, "removed_files": removed})
 
     async def _web_organize_db_apply(self, request: Any) -> Any:
         """确认并执行 LLM 修改方案，重建索引。"""
@@ -3037,6 +3600,53 @@ class PromptJournalPlugin(MaiBotPlugin):
         for i, r in enumerate(results, 1):
             note_part = f" — {r['note']}" if r.get("note") else ""
             lines.append(f'{i}. id={r["id"]} {r["en"]} / {r["zh"]}{note_part} (相似度 {r["score"]:.2f})')
+        return "\n".join(lines)
+
+    async def _execute_search_notes_multi(
+        self, keyword: str, notebook_names: list[str], limit: int = 10
+    ) -> str:
+        """跨多个引用笔记本 + 临时笔记本 tmp 语义检索，合并返回文本结果（批量导入用）。"""
+        keyword = str(keyword or "").strip()
+        if not keyword:
+            return "检索失败：关键词不能为空"
+        top_k = max(1, min(50, int(limit or 10)))
+
+        query_vec = await self._embed_single(keyword)
+        if query_vec is None:
+            return "检索失败：embedding 服务不可用"
+
+        # 笔记本集合 = 引用笔记本 + 临时笔记本
+        names = list(notebook_names or [])
+        if "tmp" not in names:
+            names.append("tmp")
+
+        merged: list[dict[str, Any]] = []
+        for name in names:
+            if name == "tmp":
+                nb = self._tmp_nb
+            else:
+                nb = self._get_notebook(name)
+            if nb is None:
+                continue
+            if not nb.check_consistency():
+                continue
+            results = await self._search_single_notebook(
+                nb, keyword, query_vec, top_k, float(self.config.journal.min_score)
+            )
+            merged.extend(results)
+
+        if not merged:
+            return "未找到相关笔记"
+        merged.sort(key=lambda x: x["score"], reverse=True)
+        merged = merged[:top_k]
+
+        lines = [f"找到 {len(merged)} 条相关笔记："]
+        for i, r in enumerate(merged, 1):
+            note_part = f" — {r['note']}" if r.get("note") else ""
+            lines.append(
+                f'{i}. [{r["notebook"]}] id={r["id"]} {r["en"]} / {r["zh"]}{note_part} '
+                f"(相似度 {r['score']:.2f})"
+            )
         return "\n".join(lines)
 
     async def _run_organize_db_round(

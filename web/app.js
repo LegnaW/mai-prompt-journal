@@ -13,6 +13,88 @@ function api(method, path, body) {
 
 function esc(s) { const d = document.createElement('div'); d.textContent = s||''; return d.innerHTML; }
 
+// ============================================================
+// 使用说明（md 渲染 + 展开栏，供各页面复用）
+// ============================================================
+
+function inlineMd(s) {
+  return s
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/`([^`]+)`/g, '<code style="background:#f5f5f5;padding:1px 4px;border-radius:3px;">$1</code>');
+}
+
+function renderMdSimple(md) {
+  const lines = md.split('\n');
+  let html = '';
+  let inList = false;
+  let inTable = false;
+  let inCode = false;
+  const closeList = () => { if (inList) { html += '</ul>'; inList = false; } };
+  const closeTable = () => { if (inTable) { html += '</table>'; inTable = false; } };
+  for (const raw of lines) {
+    const line = raw.replace(/\r$/, '');
+    const t = line.trim();
+    if (/^```/.test(t)) {
+      if (inCode) {
+        html += '</code></pre>';
+        inCode = false;
+      } else {
+        closeList(); closeTable();
+        html += '<pre style="background:#f6f8fa;border:1px solid #e1e4e8;border-radius:6px;padding:10px;overflow-x:auto;margin:6px 0;"><code>';
+        inCode = true;
+      }
+      continue;
+    }
+    if (inCode) {
+      html += esc(line) + '\n';
+      continue;
+    }
+    if (!t) { closeList(); closeTable(); continue; }
+    if (t.startsWith('|') && t.endsWith('|')) {
+      if (!inTable) {
+        closeList();
+        html += '<table style="border-collapse:collapse;width:100%;margin:6px 0;">';
+        inTable = true;
+      }
+      const cells = t.slice(1, -1).split('|').map(c => c.trim());
+      if (cells.every(c => /^-+$/.test(c))) { continue; }
+      html += '<tr>' + cells.map(c => `<td style="border:1px solid #ddd;padding:4px 8px;">${esc(c)}</td>`).join('') + '</tr>';
+      continue;
+    }
+    closeTable();
+    if (t.startsWith('- ') || t.startsWith('* ')) {
+      if (!inList) { html += '<ul style="margin:6px 0;padding-left:20px;">'; inList = true; }
+      html += `<li>${inlineMd(t.slice(2))}</li>`;
+      continue;
+    }
+    closeList();
+    if (/^###\s+/.test(t)) { html += `<h3 style="margin:10px 0 4px;">${inlineMd(t.replace(/^###\s+/, ''))}</h3>`; }
+    else if (/^##\s+/.test(t)) { html += `<h2 style="margin:12px 0 4px;">${inlineMd(t.replace(/^##\s+/, ''))}</h2>`; }
+    else if (/^#\s+/.test(t)) { html += `<h1 style="margin:12px 0 4px;">${inlineMd(t.replace(/^#\s+/, ''))}</h1>`; }
+    else { html += `<div style="margin:4px 0;">${inlineMd(t)}</div>`; }
+  }
+  closeList(); closeTable();
+  return html;
+}
+
+// 通用展开栏：prefix 为页面标识，约定 md 路径为 /web/{prefix}_guide.md，元素 id 为 {prefix}GuideBody / {prefix}GuideToggleBtn
+const _guideLoaded = {};
+
+function toggleGuide(prefix) {
+  const body = document.getElementById(prefix + 'GuideBody');
+  const btn = document.getElementById(prefix + 'GuideToggleBtn');
+  if (!body || !btn) return;
+  const hidden = body.classList.toggle('hidden');
+  btn.textContent = hidden ? '展开' : '收起';
+  if (!hidden && !_guideLoaded[prefix]) {
+    _guideLoaded[prefix] = true;
+    body.innerHTML = '<p style="color:#999">加载中...</p>';
+    fetch(`/web/${prefix}_guide.md`).then(r => r.text()).then(md => {
+      body.innerHTML = renderMdSimple(md);
+    }).catch(() => { body.innerHTML = '<p style="color:#c62828">使用说明加载失败</p>'; });
+  }
+}
+
 function showLogin() { document.getElementById('loginOverlay').classList.remove('hidden'); }
 
 function doLogin() {
@@ -21,6 +103,7 @@ function doLogin() {
     if (data.error) { alert(data.error); return; }
     document.getElementById('loginOverlay').classList.add('hidden');
     loadStatus();
+    pollTasks();
   }).catch(() => {});
 }
 
@@ -65,9 +148,11 @@ function loadStatus() {
 // ============================================================
 
 const NAV_ITEMS = [
-  { id: 'index', href: '/web/index.html', label: '📒 首页' },
-  { id: 'dedup', href: '/web/dedup.html', label: '🔄 去重' },
-  { id: 'organize', href: '/web/organize.html', label: '🤖 操作数据库' },
+  { id: 'index', href: '/web/index.html', label: '首页' },
+  { id: 'dedup', href: '/web/dedup.html', label: '去重' },
+  { id: 'organize', href: '/web/organize.html', label: '操作数据库' },
+  { id: 'import', href: '/web/import.html', label: '批量导入' },
+  { id: 'notebooks', href: '/web/notebooks.html', label: '删除笔记本' },
 ];
 
 function injectNav(activeId) {
@@ -89,7 +174,7 @@ function ensureLoginOverlay() {
   div.id = 'loginOverlay';
   div.innerHTML = `
     <div class="login-box">
-      <h3>🔑 请输入访问密码</h3>
+      <h3>请输入访问密码</h3>
       <input type="password" id="loginPassword" placeholder="密码" onkeydown="if(event.key==='Enter')doLogin()">
       <br>
       <button class="btn" onclick="doLogin()">确认</button>
@@ -110,7 +195,7 @@ function injectTaskCenter() {
   div.id = 'taskCenter';
   div.innerHTML = `
     <div class="row" style="justify-content: space-between; margin-bottom: 8px;">
-      <strong>⚙️ 当前活跃任务</strong>
+      <strong>当前活跃任务</strong>
     </div>
     <div id="taskList" style="font-size: 13px;">加载中...</div>`;
   const container = document.querySelector('.container');
@@ -140,11 +225,11 @@ function renderTaskSummary(result) {
 function renderTaskItem(t) {
   let body;
   if (t.status === 'running') {
-    body = `<span style="color:#4f9afe">⏳ ${renderTaskProgress(t)}</span>`;
+    body = `<span style="color:#4f9afe">${renderTaskProgress(t)}</span>`;
   } else if (t.status === 'done') {
-    body = `<span style="color:#2e7d32">✅ 完成 — ${renderTaskSummary(t.result)}</span>`;
+    body = `<span style="color:#2e7d32">完成 — ${renderTaskSummary(t.result)}</span>`;
   } else {
-    body = `<span style="color:#c62828">❌ 失败 — ${esc(t.error || '未知错误')}</span>`;
+    body = `<span style="color:#c62828">失败 — ${esc(t.error || '未知错误')}</span>`;
   }
   return `<div style="padding:6px 0;border-bottom:1px solid #f0f0f0;">
     <strong>${esc(t.label || t.type)}</strong> ${body}
@@ -172,7 +257,13 @@ function pollTasks() {
     document.getElementById('taskCenter').dataset.running = hasRunning ? '1' : '0';
     // 任务从运行态变为结束态时刷新状态栏（笔记本数量/索引状态可能变化）
     if (prevRunning && !hasRunning) loadStatus();
-  }).catch(() => {});
+  }).catch(() => {
+    const list = document.getElementById('taskList');
+    if (list && list.textContent.includes('加载中')) {
+      list.innerHTML = '<span style="color:#999">无法获取任务状态</span>';
+    }
+    stopTaskPoll();
+  });
 }
 
 function startTaskPoll() {

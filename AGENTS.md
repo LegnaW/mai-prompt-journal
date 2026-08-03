@@ -1,17 +1,19 @@
 # 麦麦的绘图笔记本（mai-prompt-journal）开发指南
 
+> **⚠️ 本文件已脱敏（不含本地绝对路径）。** 本插件的源码位于麦麦的插件目录，主程序源码位于麦麦的部署根目录下（`MaiBot-main/`）。若开发时确需访问这些目录，请先向使用者询问这两个目录的具体路径，不要自行猜测。
+
 ## 目录速查
 
 | 用途 | 路径 |
 |------|------|
-| 本插件源码 | `/root/mai/data/MaiMBot/plugins/mai-prompt-journal/` |
-| 主程序源码 | `/root/mai/MaiBot-main/` |
-| 插件开发文档 | `/root/mai/docs-main/zh/plugin/`（推荐先读 `manifest.md`、`tools.md`、`commands.md`、`api-reference.md`） |
+| 本插件源码 | 麦麦插件目录中的 `mai-prompt-journal/` |
+| 主程序源码 | 麦麦部署根目录下的 `MaiBot-main/` |
+| 插件开发文档 | 麦麦的 `docs-main/zh/plugin/`（推荐先读 `manifest.md`、`tools.md`、`commands.md`、`api-reference.md`） |
 | SDK 官方指南 | https://github.com/Mai-with-u/maibot-plugin-sdk/blob/main/docs/guide.md |
-| 能力清单（权威） | `/root/mai/MaiBot-main/src/plugin_runtime/capabilities/registry.py` |
-| 权限校验实现 | `/root/mai/MaiBot-main/src/plugin_runtime/host/authorization.py` |
-| 参考插件示例 | `/root/mai/MaiBot-main/plugins/hello_world_plugin/plugin.py` |
-| 配置 Schema 参考（json_schema_extra 用法） | `/root/mai/data/MaiMBot/plugins/maimai-drawpic-plugin-bak/core/config.py` |
+| 能力清单（权威） | 主程序源码 `src/plugin_runtime/capabilities/registry.py` |
+| 权限校验实现 | 主程序源码 `src/plugin_runtime/host/authorization.py` |
+| 参考插件示例 | 主程序源码 `plugins/hello_world_plugin/plugin.py` |
+| 配置 Schema 参考（json_schema_extra 用法） | 其他插件的 `core/config.py`（如 maimai-drawpic-plugin） |
 
 ## 插件概览
 
@@ -32,6 +34,8 @@
 | `web/index.html` | WebUI 首页（状态栏 + 搜索/浏览 + 添加 + 索引管理） |
 | `web/dedup.html` | WebUI 去重页 |
 | `web/organize.html` | WebUI 操作数据库页 |
+| `web/import.html` | WebUI txt 批量导入页 |
+| `web/notebooks.html` | WebUI 删除笔记本页 |
 | `web/app.js` | WebUI 共享逻辑（api/esc/登录/loadStatus/导航注入） |
 | `web/style.css` | WebUI 共享样式 |
 | `config.toml` | 运行时配置 |
@@ -181,6 +185,20 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 - `POST /api/organize_db/apply` 成功后清除对应 `session_id` 会话。
 - 前端对话框内：方案预览 + [补充要求输入框 + 追加要求] + [确认执行] + [清除]，每轮刷新只显示最新方案。
 
+## txt 批量导入（WebUI 功能）
+
+把一份 txt 按段落批量交给 LLM 处理，写入临时笔记本，完成后可查看/编辑/处置。
+
+- **切分**：`_split_txt`（模块级函数）按两个及以上连续换行（`\n{2,}`）切分，段首尾 strip，忽略空段，单段也能导入。
+- **临时笔记本**：固定名 `tmp`，文件在 `data_dir/tmp_import/`（`tmp.jsonl` / `tmp.cache.jsonl` / `tmp.embeddings.npy` / `tmp.index.meta` / `import.log`），用 `Notebook("tmp", data_dir, custom_dir=tmp_import_dir)` 构造，**不参与** `_discover_notebooks`（但 `_get_notebook("tmp")` 返回它，供 `/api/modify`、`/api/delete` 编辑临时条目）。一轮完成后**不清理**；下一轮导入开始前 `_reset_tmp_import()` 清空。
+- **一段一完整循环**：`_run_import_segment` 对每段独立跑 agent 循环（多轮 search_notes），搜索范围 = 用户选择的引用笔记本 + 临时笔记本（`_execute_search_notes_multi`）；系统提示词 = `organize_db.system_prompt` + `\n` + `batch_import_prompt`（`{temp-journal}` 替换为 `tmp`，约束 LLM 只能改临时笔记本）；输出完整 create/update/delete，`_apply_ops_to_tmp` 应用后 `_rebuild_notebook(tmp)` 增量重建，下一段可见。
+- **模式（附加提示词）是纯前端**：`web/import.html` 四模式单选（学习描述方式/导入人物形象/提取动作模板/自定义），预设直接发对应 `IMPORT_MODE_PROMPTS` 文本，自定义弹窗输入；`POST /api/import/start` 的 `mode_prompt` 字段后端仅校验非空（双重校验）。
+- **失败处理**：某段 LLM 调用/解析/写入失败 → 跳过该段，记录到 result.failed，继续下一段；导入完成后把失败汇总追加到 `import.log` 末尾。
+- **日志**：`import.log` 记录每段时间、用户输入、附加提示词、LLM 决定与理由（reason + operations）、成功/失败。
+- **处置**（`POST /api/import/resolve`）：`merge` 合并入已有笔记本（复用 tmp 向量直接追加）、`create` 新建笔记本（复制 tmp 四文件到 `imports/{new_name}.jsonl`，`_discover_notebooks` 自动发现）、`discard` 丢弃（仅清空状态，文件留给下一轮清理）。
+- **API**：`POST /api/import/preview`（切分预览）/ `POST /api/import/start` / `GET /api/import/status` / `GET /api/import/tmp_notes` / `GET /api/import/log` / `POST /api/import/resolve`。
+- 导入走通用任务中心 `_start_task("import", ...)`，与 rebuild 互斥（进行中拒绝新任务，409）；进度在导入页 + 顶部任务栏同步显示。
+
 ## 命令规范
 
 - 所有 `/mpj *` 指令**必须管理员校验**：`self._is_admin(user_id)` 检查 `config.admin.users` 列表
@@ -237,7 +255,7 @@ Field(
     },
 )
 ```
-参考成熟插件：`/root/mai/data/MaiMBot/plugins/maimai-drawpic-plugin-bak/core/config.py`（每个字段都带 label/hint/order）。
+参考成熟插件：其他插件的 `core/config.py`（如 maimai-drawpic-plugin，每个字段都带 label/hint/order）。
 
 ### 其他 json_schema_extra 用法
 - `Optional` 类型（`float | None` / `int | None`）会被 SDK `_map_field_type` 映射为 `string` → 渲染成文本输入框。要保留"可留空"语义又想显示数字输入框，用 `"x-widget": "number"` 强制。
@@ -247,9 +265,8 @@ Field(
 - 节标题 = `__ui_label__`，节描述 = 类 docstring（`_build_section_schema` 用 `config_class.__doc__`）。给每个配置节类写好中文 docstring。
 
 ### 验证 Schema 是否生成正确
-宿主 `python3`（3.10）无法 import 容器 SDK，用已装好依赖的 uv 虚拟环境实测：
+宿主 `python3`（3.10）无法 import 容器 SDK，用已装好依赖的 uv 虚拟环境实测（执行环境：麦麦部署根目录下 `MaiBot-main/.venv/bin/python`）：
 ```python
-# 用 /root/mai/MaiBot-main/.venv/bin/python 执行
 import sys
 sys.path.insert(0, "<插件目录>")
 import plugin as m
@@ -273,7 +290,7 @@ schema = generate_plugin_config_schema(m.PromptJournalConfig)
 2. 用 AST 检查确认 Tool/Command/HomeCard/路由注册无遗漏
 3. 若改 `_compute_text_boost`，用独立脚本跑加分规则用例
 4. 若改 WebUI，用脚本检查 HTML div 配对、关键元素存在
-5. 若改配置模型，用 `python3.13` + 容器 SDK 跑 `generate_plugin_config_schema` 实测 label/hint/ui_type（见上文"验证 Schema"）
+5. 若改配置模型，用 uv 虚拟环境（`MaiBot-main/.venv/bin/python`）跑 `generate_plugin_config_schema` 实测 label/hint/ui_type（见上文"验证 Schema"）
 
 ## 维护提示
 

@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>删除笔记本 - 麦麦的绘图笔记本</title>
+<link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+<div class="container">
+  <div id="nav"></div>
+
+  <div class="card">
+    <div class="row" style="justify-content: space-between; margin-bottom: 8px;">
+      <strong>删除笔记本</strong>
+      <button class="btn btn-outline btn-sm" onclick="loadNotebooks()">刷新</button>
+    </div>
+    <div style="font-size:12px;color:#999;margin-bottom:10px;">删除后该笔记本的笔记数据将不可恢复。default 与临时笔记本不可删除，若要删除请使用系统文件管理。</div>
+    <div id="notebookList"></div>
+  </div>
+</div>
+
+<script src="/web/app.js"></script>
+<script>
+function loadNotebooks() {
+  const div = document.getElementById('notebookList');
+  div.innerHTML = '<p style="color:#999">加载中...</p>';
+  api('GET', '/api/status').then(data => {
+    const notebooks = data.notebooks || [];
+    if (notebooks.length === 0) {
+      div.innerHTML = '<p style="color:#999">暂无笔记本</p>';
+      return;
+    }
+    div.innerHTML = notebooks.map(nb => {
+      const statusText = { ok: '索引有效 ✓', stale: '索引失效 ✗', no_index: '未建索引', empty: '空' }[nb.status] || nb.status;
+      const deletable = nb.name !== 'default';
+      return `<div style="border:1px solid #eee;border-radius:8px;margin:8px 0;padding:10px;">
+        <div class="row" style="flex-wrap:wrap;align-items:center;">
+          <span style="flex:1;min-width:0;font-weight:600;">${esc(nb.name)}</span>
+          <span style="color:#999;font-size:13px;">${nb.count} 条 · ${statusText}</span>
+          <button class="btn btn-danger btn-sm" ${deletable ? `onclick="doDeleteNotebook('${esc(nb.name)}', ${nb.count})"` : 'disabled'}>${deletable ? '删除' : '不可删除'}</button>
+        </div>
+      </div>`;
+    }).join('');
+  }).catch(() => { div.innerHTML = '<p style="color:#c62828">加载失败</p>'; });
+}
+
+function doDeleteNotebook(name, count) {
+  if (!confirm(`确认删除笔记本 "${name}"？共 ${count} 条笔记，删除后不可恢复。`)) return;
+  api('POST', '/api/notebooks/delete', { name: name }).then(data => {
+    if (data.error) { alert(data.error); return; }
+    alert(`已删除笔记本 ${name}`);
+    loadNotebooks();
+    loadStatus();
+  }).catch(() => {});
+}
+
+injectNav('notebooks');
+loadNotebooks();
+loadStatus();
+</script>
+</body>
+</html>

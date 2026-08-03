@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>批量导入 - 麦麦的绘图笔记本</title>
+<link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+<div class="container">
+  <div id="nav"></div>
+
+  <div class="card" id="importStatusCard">
+    <div class="row" style="justify-content: space-between; margin-bottom: 8px;">
+      <strong>导入状况</strong>
+    </div>
+    <div id="importStatusBody" style="font-size:14px;"></div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content: space-between; margin-bottom: 8px;">
+      <strong>txt 批量导入</strong>
+    </div>
+
+    <div style="margin-bottom: 12px;">
+      <div id="importDropZone" style="border:2px dashed #4f9afe;border-radius:10px;padding:36px 16px;text-align:center;cursor:pointer;background:#f5f9ff;transition:background 0.2s;"
+        onclick="if(!this.classList.contains('disabled'))document.getElementById('importFile').click()"
+        ondragover="if(!this.classList.contains('disabled')){event.preventDefault();this.style.background='#e3efff';}"
+        ondragleave="this.style.background='#f5f9ff';"
+        ondrop="handleImportDrop(event)">
+        <div style="font-size:16px;color:#3a8bef;">点击选择 或 拖拽 txt 文件到此处</div>
+        <div id="importDropFileName" style="font-size:13px;color:#888;margin-top:8px;">支持 .txt 文本文件</div>
+        <input type="file" id="importFile" accept=".txt" style="display:none;" onchange="importFileSelected()">
+      </div>
+      <div class="row" style="margin-top:8px;">
+        <button class="btn" id="importPreviewBtn" onclick="doPreviewImport()">解析预览</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" id="importConfigCard">
+    <div class="row" style="justify-content: space-between; margin-bottom: 8px;">
+      <strong>导入配置</strong>
+    </div>
+    <div style="margin-bottom: 12px;">
+      <div class="row" style="margin-bottom: 4px;">
+        <label>模式:</label>
+        <label><input type="radio" name="importMode" value="learn_style" onchange="syncImportModePrompt()"> 学习描述方式</label>
+        <label><input type="radio" name="importMode" value="import_character" onchange="syncImportModePrompt()"> 导入人物形象</label>
+        <label><input type="radio" name="importMode" value="action_template" onchange="syncImportModePrompt()"> 提取动作模板</label>
+        <label><input type="radio" name="importMode" value="custom" checked onchange="syncImportModePrompt()"> 自定义</label>
+      </div>
+      <div style="font-size:12px;color:#999;">选择预设模式时附加提示词自动锁定为对应预设，无法修改；选择"自定义"时可编辑。附加提示词将作用于整次导入的所有段落。</div>
+      <div style="margin-top:8px;">
+        <label style="display:block; margin-bottom:4px;">附加提示词:</label>
+        <textarea id="importCustomPrompt" rows="3" placeholder="选择自定义模式后在此输入你的附加提示词"></textarea>
+      </div>
+    </div>
+    <div style="margin-bottom: 12px;">
+      <label style="display:block; margin-bottom:4px;">引用笔记本（LLM 检索范围，可多选，也可全不选）:</label>
+      <div id="importRefNotebooks" style="font-size:13px;display:flex;flex-wrap:wrap;gap:8px;">
+        <label><input type="checkbox" class="import-ref-cb" value="default" checked> default</label>
+      </div>
+    </div>
+    <div class="row">
+      <button class="btn btn-success" id="importStartBtn" onclick="doStartImport()">开始导入</button>
+    </div>
+    <div id="importProgress" style="margin-top:10px;"></div>
+  </div>
+
+  <div class="card" id="importGuideCard">
+    <div class="row" style="justify-content: space-between; margin-bottom: 8px;">
+      <strong>使用说明</strong>
+      <button class="btn btn-outline btn-sm" id="importGuideToggleBtn" onclick="toggleGuide('import')">展开</button>
+    </div>
+    <div id="importGuideBody" class="hidden" style="font-size:13px;line-height:1.8;color:#333;"></div>
+  </div>
+
+  <div class="card hidden" id="importPreviewCard">
+    <div class="row" style="justify-content: space-between; margin-bottom: 8px;">
+      <strong>拆分预览</strong>
+      <button class="btn btn-outline btn-sm" id="importPreviewToggleBtn" onclick="toggleAllSegments()">展开</button>
+    </div>
+    <div id="importPreview" class="hidden"></div>
+  </div>
+</div>
+
+<script src="/web/app.js"></script>
+<script>
+let importSegments = [];
+let importTaskId = null;
+let importStatusFailedRendered = false;
+
+const IMPORT_MODE_PROMPTS = {
+  learn_style: '阅读以下提示词，找出有学习价值且没有与已知数据库重复的提示词片段。应优先记录有意义的 tag 组合或搭配（如形象设计、表情动作、背景、氛围、服装与配饰等彼此搭配形成的完整特征，一般由 3~6 个 tag 构成），不要只记录孤立、通用的单一 tag——单独一个常见 tag 通常缺乏学习价值且容易与已有条目重复。若关键描述片段本身是用自然语言写成的，也可以直接以这段自然语言进行记录。对每个片段在note中简要总结其作用并给出使用场景。',
+  import_character: '以下为某个自定义角色形象的名称和形象设定，若笔记本内不存在这名角色的设定信息，则将其整理为1条笔记，在备注中写明人物名称。若存在重复，则更新已有的笔记。',
+  action_template: '以下为一组完整的提示词，请去除其中的所有角色形象描述（包括发型发色、外观面貌、服装饰品等等），仅保留动作描述，整理为1条笔记，在备注中除内容简要总结/使用场景外，还要额外备注"此为动作模板，无形象描述，需添加后使用"。',
+};
+
+function getImportMode() {
+  const el = document.querySelector('input[name="importMode"]:checked');
+  return el ? el.value : 'custom';
+}
+
+function syncImportModePrompt() {
+  const mode = getImportMode();
+  const ta = document.getElementById('importCustomPrompt');
+  if (mode === 'custom') {
+    ta.disabled = false;
+  } else {
+    ta.value = IMPORT_MODE_PROMPTS[mode] || '';
+    ta.disabled = true;
+  }
+}
+
+function getImportModePrompt() {
+  const mode = getImportMode();
+  if (mode === 'custom') return document.getElementById('importCustomPrompt').value.trim();
+  return IMPORT_MODE_PROMPTS[mode] || '';
+}
+
+function loadImportNotebooks() {
+  api('GET', '/api/status').then(st => {
+    const wrap = document.getElementById('importRefNotebooks');
+    wrap.innerHTML = '';
+    (st.notebooks || []).forEach(nb => {
+      wrap.innerHTML += `<label><input type="checkbox" class="import-ref-cb" value="${esc(nb.name)}" ${nb.name==='default'?'checked':''}> ${esc(nb.name)}</label>`;
+    });
+    const mt = document.getElementById('importMergeTarget');
+    mt.innerHTML = '';
+    (st.notebooks || []).forEach(nb => {
+      mt.innerHTML += `<option value="${esc(nb.name)}">${esc(nb.name)}</option>`;
+    });
+  }).catch(() => {});
+}
+
+function importFileSelected() {
+  const fileEl = document.getElementById('importFile');
+  const file = fileEl.files && fileEl.files[0];
+  const label = document.getElementById('importDropFileName');
+  if (file) {
+    label.textContent = '已选择：' + file.name;
+    doPreviewImport();
+  } else {
+    label.textContent = '支持 .txt 文本文件';
+  }
+}
+
+function handleImportDrop(event) {
+  event.preventDefault();
+  const zone = document.getElementById('importDropZone');
+  zone.style.background = '#f5f9ff';
+  const dt = event.dataTransfer;
+  const file = dt && dt.files && dt.files[0];
+  if (!file) return;
+  if (!/\.txt$/i.test(file.name)) { alert('仅支持 .txt 文本文件'); return; }
+  const fileEl = document.getElementById('importFile');
+  fileEl.files = dt.files;
+  document.getElementById('importDropFileName').textContent = '已选择：' + file.name;
+  doPreviewImport();
+}
+
+function doPreviewImport() {
+  const fileEl = document.getElementById('importFile');
+  const file = fileEl.files && fileEl.files[0];
+  if (!file) { alert('请先选择 txt 文件'); return; }
+  const reader = new FileReader();
+  reader.onload = () => {
+    const text = String(reader.result || '');
+    api('POST', '/api/import/preview', { text: text }).then(data => {
+      const div = document.getElementById('importPreview');
+      if (data.error) { div.innerHTML = `<p style="color:#c62828">${esc(data.error)}</p>`; return; }
+      importSegments = data.segments;
+      div.innerHTML = `<p>共 ${data.count} 段（按连续两个及以上换行切分）：</p>` +
+        data.segments.map((s, i) => `
+          <div style="border:1px solid #eee;border-radius:6px;margin:6px 0;padding:8px;">
+            <strong>段 ${i+1}</strong>
+            <div style="font-size:12px;color:#555;white-space:pre-wrap;word-break:break-all;margin-top:6px;">${esc(s)}</div>
+          </div>`).join('');
+      document.getElementById('importPreview').classList.add('hidden');
+      document.getElementById('importPreviewToggleBtn').textContent = '展开';
+      document.getElementById('importPreviewCard').classList.remove('hidden');
+    }).catch(() => {});
+  };
+  reader.readAsText(file, 'utf-8');
+}
+
+function toggleAllSegments() {
+  const body = document.getElementById('importPreview');
+  const btn = document.getElementById('importPreviewToggleBtn');
+  const hidden = body.classList.toggle('hidden');
+  btn.textContent = hidden ? '展开' : '收起';
+}
+
+function collectRefNotebooks() {
+  return Array.from(document.querySelectorAll('.import-ref-cb:checked')).map(el => el.value);
+}
+
+function doStartImport() {
+  const modePrompt = getImportModePrompt();
+  if (!modePrompt) { alert('附加提示词不能为空'); return; }
+  const fileEl = document.getElementById('importFile');
+  const file = fileEl.files && fileEl.files[0];
+  if (!file) { alert('请先选择 txt 文件'); return; }
+  const reader = new FileReader();
+  reader.onload = () => {
+    const text = String(reader.result || '');
+    const payload = {
+      text: text,
+      mode_prompt: modePrompt,
+      ref_notebooks: collectRefNotebooks(),
+    };
+    const prog = document.getElementById('importProgress');
+    prog.innerHTML = '<p style="color:#999">提交导入任务中...</p>';
+    api('POST', '/api/import/start', payload).then(data => {
+      if (data.error) { prog.innerHTML = `<p style="color:#c62828">${esc(data.error)}</p>`; return; }
+      importTaskId = data.task_id || null;
+      if (importTaskId) {
+        refreshImportState();
+        pollTasks();
+        return;
+      }
+      prog.innerHTML = '<p style="color:#c62828">未获取到任务 ID，请重试</p>';
+    }).catch(() => { prog.innerHTML = '<p style="color:#c62828">提交失败，请重试</p>'; });
+  };
+  reader.readAsText(file, 'utf-8');
+}
+
+// ============ 导入状况状态机 ============
+
+function setImportDisabled(disabled) {
+  const zone = document.getElementById('importDropZone');
+  const previewBtn = document.getElementById('importPreviewBtn');
+  const radios = document.querySelectorAll('input[name="importMode"]');
+  const ta = document.getElementById('importCustomPrompt');
+  const refs = document.querySelectorAll('.import-ref-cb');
+  const startBtn = document.getElementById('importStartBtn');
+  if (disabled) {
+    zone.classList.add('disabled');
+    zone.style.cursor = 'not-allowed';
+    zone.style.background = '#f0f0f0';
+    zone.style.borderColor = '#ccc';
+    previewBtn.disabled = true;
+    radios.forEach(r => r.disabled = true);
+    ta.disabled = true;
+    refs.forEach(r => r.disabled = true);
+    startBtn.disabled = true;
+  } else {
+    zone.classList.remove('disabled');
+    zone.style.cursor = 'pointer';
+    zone.style.background = '#f5f9ff';
+    zone.style.borderColor = '#4f9afe';
+    previewBtn.disabled = false;
+    radios.forEach(r => r.disabled = false);
+    refs.forEach(r => r.disabled = false);
+    startBtn.disabled = false;
+    syncImportModePrompt();
+  }
+}
+
+function renderImportStatus(state) {
+  const body = document.getElementById('importStatusBody');
+  const card = document.getElementById('importStatusCard');
+  let html = '';
+  if (state.state === 'building') {
+    card.style.background = '#fff8e1';
+    const p = state.progress || {};
+    const total = p.total || 0;
+    const done = p.done || 0;
+    const failedCount = state.failed_count || 0;
+    html = `<div>
+      <div style="color:#8d6e63;"><strong>笔记本构建中</strong>：正在逐段导入，请稍候。</div>
+      <div style="margin-top:8px;color:#8d6e63;">段 ${p.current_index || 1}/${total}（已完成 ${done}/${total}）${failedCount ? `，已失败 <span style="color:#c62828">${failedCount}</span> 段` : ''}</div>
+      <div class="row" style="margin-top:10px;">
+        <button class="btn btn-danger btn-sm" onclick="doCancelImport()">取消导入</button>
+      </div>
+    </div>`;
+  } else if (state.state === 'ready') {
+    card.style.background = '#e3f2fd';
+    const failedCount = state.failed_count || 0;
+    html = `<div>
+      <div style="color:#1565c0;"><strong>构建完毕，等待导入</strong>：共 ${state.total} 条笔记${failedCount ? `，失败 <span style="color:#c62828">${failedCount}</span> 段` : ''}。</div>
+      <div style="margin-top:10px;border:1px solid #90caf9;border-radius:8px;background:#f5fbff;">
+        <div class="row" style="justify-content: space-between; padding:8px 10px;">
+          <span style="font-size:14px;color:#1565c0;"><strong>临时笔记本</strong>（${state.total} 条）</span>
+          <div class="row">
+            <button class="btn btn-outline btn-sm" onclick="downloadImportLog()">下载日志</button>
+            <button class="btn btn-outline btn-sm" id="importNotesToggleBtn" onclick="toggleImportNotes()">展开</button>
+          </div>
+        </div>
+        <div id="importStatusNotes" class="hidden" style="border-top:1px solid #e0eefb;padding:8px 10px;"></div>
+      </div>
+      <div id="importStatusFailed" class="hidden" style="margin-top:8px;"></div>
+      <div style="margin-top:12px;border-top:1px solid #90caf9;padding-top:10px;">
+        <div class="row" style="margin-bottom:8px;align-items:flex-start;">
+          <strong style="margin-top:8px;">处置临时笔记本:</strong>
+        </div>
+        <div class="row" style="margin-bottom:8px;">
+          <button class="btn btn-sm" onclick="doResolveImport('merge')">合并入已有笔记本</button>
+          <select id="importMergeTarget"><option value="default">default</option></select>
+        </div>
+        <div class="row" style="margin-bottom:8px;">
+          <button class="btn btn-sm" onclick="doResolveImport('create')">新建笔记本</button>
+          <input type="text" id="importNewName" placeholder="新笔记本名称" style="flex:0 1 200px;">
+        </div>
+        <div class="row">
+          <button class="btn btn-danger btn-sm" onclick="doResolveImport('discard')">删除</button>
+        </div>
+      </div>
+    </div>`;
+  } else if (state.state === 'done') {
+    card.style.background = '#e8f5e9';
+    html = `<div style="color:#2e7d32;"><strong>已完成</strong>：本次导入已结束，可导入新的 txt 文件。</div>`;
+  } else {
+    card.style.background = '#f5f5f5';
+    html = `<div style="color:#888;">尚未开始：请上传一份 txt 以开始导入。</div>`;
+  }
+  body.innerHTML = html;
+}
+
+let importStateTimer = null;
+
+function refreshImportState() {
+  api('GET', '/api/import/state').then(state => {
+    if (state.error) return;
+    renderImportStatus(state);
+    setImportDisabled(state.state === 'building');
+    if (state.state === 'ready') {
+      if (importStatusFailedRendered === false) {
+        renderImportFailed(state);
+        importStatusFailedRendered = true;
+      }
+      renderImportNotes();
+    }
+    if (state.state === 'building') {
+      if (!importStateTimer) {
+        importStateTimer = setInterval(refreshImportState, 2000);
+      }
+    } else if (importStateTimer) {
+      clearInterval(importStateTimer);
+      importStateTimer = null;
+    }
+  }).catch(() => {});
+}
+
+function doCancelImport() {
+  if (!confirm('确认取消本次导入并清空缓存？已导入的段落将被丢弃。')) return;
+  api('POST', '/api/import/cancel').then(data => {
+    if (data.error) { alert(data.error); return; }
+    importTaskId = null;
+    refreshImportState();
+    loadStatus();
+  }).catch(() => {});
+}
+
+function toggleImportNotes() {
+  const div = document.getElementById('importStatusNotes');
+  const btn = document.getElementById('importNotesToggleBtn');
+  const hidden = div.classList.toggle('hidden');
+  if (btn) btn.textContent = hidden ? '展开' : '收起';
+}
+
+function renderImportFailed(state) {
+  const div = document.getElementById('importStatusFailed');
+  const failed = state.failed || [];
+  if (failed.length === 0) return;
+  div.classList.remove('hidden');
+  div.innerHTML = `<div style="background:#fdecea;border:1px solid #f5c6cb;border-radius:6px;padding:10px;">
+    <strong style="color:#c62828">失败条目（${failed.length}）:</strong>
+    ${failed.map(f => `<div style="font-size:12px;margin-top:4px;color:#c62828;">段 ${f.index}: ${esc(f.error)}</div>`).join('')}
+  </div>`;
+}
+
+function renderImportNotes() {
+  api('GET', '/api/import/tmp_notes').then(data => {
+    const div = document.getElementById('importStatusNotes');
+    const notes = data.notes || [];
+    if (notes.length === 0) {
+      div.innerHTML = '<p style="color:#999">临时笔记本为空</p>';
+      return;
+    }
+    div.innerHTML = `<p style="margin-bottom:6px;"><strong>临时笔记本（${notes.length} 条）:</strong></p>` +
+      notes.map(n => `
+        <div style="margin:6px 0;padding:6px;border:1px solid #90caf9;border-radius:6px;">
+          <div class="row" style="flex-wrap:wrap;align-items:flex-start;">
+            <span style="flex:1;min-width:0;word-break:break-all;">${esc(n.en)} / ${esc(n.zh)}${n.note?' — '+esc(n.note):''}</span>
+            <span class="id">${n.id}</span>
+            <div style="display:flex;flex-direction:column;gap:4px;flex:0 0 auto;">
+              <button class="btn btn-sm" onclick="startImportEdit('${n.id}')">编辑</button>
+              <button class="btn btn-danger btn-sm" onclick="delImportEntry('${n.id}')">删除</button>
+            </div>
+          </div>
+          <div id="importeditrow_${n.id}" class="hidden" style="margin-top:6px;">
+            <div class="row">
+              <input type="text" id="importediten_${n.id}" placeholder="英文" value="${esc(n.en||'')}">
+              <input type="text" id="importeditzh_${n.id}" placeholder="中文" value="${esc(n.zh||'')}">
+              <input type="text" id="importeditnote_${n.id}" placeholder="备注" value="${esc(n.note||'')}">
+              <button class="btn btn-sm btn-success" onclick="saveImportEdit('${n.id}')">保存</button>
+              <button class="btn btn-sm btn-outline" onclick="cancelImportEdit('${n.id}')">取消</button>
+            </div>
+          </div>
+        </div>`).join('');
+  }).catch(() => {});
+}
+
+function startImportEdit(id) {
+  const row = document.getElementById('importeditrow_' + id);
+  if (row) row.classList.remove('hidden');
+}
+function cancelImportEdit(id) {
+  const row = document.getElementById('importeditrow_' + id);
+  if (row) row.classList.add('hidden');
+}
+function saveImportEdit(id) {
+  const en = document.getElementById('importediten_' + id).value.trim();
+  const zh = document.getElementById('importeditzh_' + id).value.trim();
+  const note = document.getElementById('importeditnote_' + id).value.trim();
+  if (!en || !zh) { alert('英文和中文不能为空'); return; }
+  api('POST', '/api/modify', { note_id: id, notebook: 'tmp', en: en, zh: zh, note: note }).then(data => {
+    if (data.error) { alert(data.error); return; }
+    cancelImportEdit(id);
+    refreshImportState();
+  }).catch(() => {});
+}
+function delImportEntry(id) {
+  if (!confirm(`确认删除笔记 ${id}？`)) return;
+  api('POST', '/api/delete', { note_id: id, notebook: 'tmp' }).then(data => {
+    if (data.error) { alert(data.error); return; }
+    refreshImportState();
+  }).catch(() => {});
+}
+
+function downloadImportLog() {
+  window.location.href = '/api/import/log';
+}
+
+function doResolveImport(action) {
+  if (action === 'merge') {
+    if (!confirm('确认将临时笔记本合并入所选笔记本？')) return;
+    const payload = { action: 'merge', target_notebook: document.getElementById('importMergeTarget').value };
+    api('POST', '/api/import/resolve', payload).then(data => {
+      if (data.error) { alert(data.error); return; }
+      alert(`已合并 ${data.count} 条到 ${data.target}`);
+      importStatusFailedRendered = false;
+      refreshImportState();
+      loadStatus();
+    }).catch(() => {});
+  } else if (action === 'create') {
+    const name = document.getElementById('importNewName').value.trim();
+    if (!name) { alert('请输入新笔记本名称'); return; }
+    if (!confirm(`确认新建笔记本 "${name}"？`)) return;
+    api('POST', '/api/import/resolve', { action: 'create', new_name: name }).then(data => {
+      if (data.error) { alert(data.error); return; }
+      alert(`已新建笔记本 ${data.name}（${data.count} 条）`);
+      importStatusFailedRendered = false;
+      refreshImportState();
+      loadStatus();
+    }).catch(() => {});
+  } else {
+    if (!confirm('确认丢弃临时笔记本？此操作不可恢复。')) return;
+    api('POST', '/api/import/resolve', { action: 'discard' }).then(data => {
+      if (data.error) { alert(data.error); return; }
+      alert('已丢弃临时笔记本');
+      importStatusFailedRendered = false;
+      refreshImportState();
+      loadStatus();
+    }).catch(() => {});
+  }
+}
+
+injectNav('import');
+syncImportModePrompt();
+loadImportNotebooks();
+loadStatus();
+refreshImportState();
+</script>
+</body>
+</html>
