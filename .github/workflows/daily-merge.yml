@@ -1,0 +1,40 @@
+name: daily-merge-dev-to-main
+
+on:
+  schedule:
+    - cron: '30 2 * * *'   # 北京时间 10:30（UTC+8）
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Fetch dev
+        run: git fetch origin dev
+
+      - name: Checkout dev（合并前门禁用）
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          path: dev
+          fetch-depth: 0
+
+      - name: 合并前语法门禁
+        working-directory: dev
+        run: python3 -m py_compile plugin.py
+
+      - name: Fast-forward 合并 dev 到 main 并推送
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git merge --ff-only FETCH_HEAD
+          git push
