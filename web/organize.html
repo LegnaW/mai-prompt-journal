@@ -34,7 +34,7 @@
     </div>
     <div style="margin-bottom: 12px;">
       <label style="display:block; margin-bottom:4px;">附加提示词:</label>
-      <div id="organizeDbModePromptDisplay" style="font-size:12px;color:#555;background:#f5f5f5;border:1px solid #eee;border-radius:4px;padding:6px 8px;margin-bottom:8px;white-space:pre-wrap;word-break:break-all;">附加提示词: 无</div>
+      <div id="organizeDbModePromptDisplay" style="font-size:12px;color:#555;background:#f5f5f5;border:1px solid #eee;border-radius:4px;padding:6px 8px;margin-bottom:8px;white-space:pre-wrap;word-break:break-all;">附加提示词: 无，需在输入框指定具体要求，如按要求批量修改数据库等。</div>
       <label style="display:block; margin-bottom:4px;">操作要求（随请求提交给 AI）:</label>
       <textarea id="organizeDbRequirement" rows="2" placeholder="根据所选模式填写：学习描述方式=提示词全文；导入oc设计=角色名称与设定；提取动作模板=完整提示词；提取服饰穿搭=完整提示词；无附加提示词=直接填写操作要求"></textarea>
     </div>
@@ -75,7 +75,7 @@ function updateOrganizeDbModePrompt() {
   const prompt = ORGANIZE_DB_MODE_PROMPTS[mode] || '';
   const display = document.getElementById('organizeDbModePromptDisplay');
   if (display) {
-    display.textContent = '附加提示词: ' + (prompt || '无');
+    display.textContent = '附加提示词: ' + (prompt || '无，需在输入框指定具体要求，如按要求批量修改数据库等。');
   }
 }
 
