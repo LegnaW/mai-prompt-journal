@@ -55,11 +55,6 @@ _WRITE_TOOL_NAMES = ["add_aidraw_notes", "modify_aidraw_note", "delete_aidraw_no
 # WebUI 登录 HttpOnly cookie 有效期（秒），7 天
 _WEBUI_SESSION_TTL = 7 * 24 * 3600
 
-# 负面搜索：负面强度对最终分的扣分权重（0~1，满负面扣 0.5）
-_NEG_PENALTY_WEIGHT = 0.5
-# _compute_text_boost 的最大可能值，用于把负面文本匹配强度归一化到 0~1
-_POS_TEXT_BOOST_MAX = 0.30
-
 # WebUI 去重扫描相似度矩阵的分块大小（行）：内存峰值从 N×N 降到 块大小×N
 _DEDUP_SCAN_BLOCK = 256
 
@@ -1027,13 +1022,10 @@ class PromptJournalPlugin(MaiBotPlugin):
 
     @Tool(
         "read_aidraw_notes",
-        brief_description="从绘图笔记本中搜索相关提示词经验（可排除负面内容）",
+        brief_description="从绘图笔记本中搜索相关提示词经验",
         detailed_description=(
             "根据绘图关键词语义搜索之前记录的提示词笔记。"
             "当你需要参考过去的绘图经验、查找合适的标签组合时调用此工具。"
-            "如需排除不想参考的内容（如排除某个角色、风格、属性），可在 neg_query 中填写负面关键词，"
-            "搜索结果会同时参考 query 与 neg_query：与负面内容越相似的结果排序越靠后、甚至被过滤掉。"
-            "neg_query 可选，不填则只按 query 搜索。"
         ),
         parameters=[
             ToolParameterInfo(
@@ -1041,12 +1033,6 @@ class PromptJournalPlugin(MaiBotPlugin):
                 param_type=ToolParamType.STRING,
                 description="搜索关键词，可以是中文或英文，如 '猫娘' 或 'school uniform'",
                 required=True,
-            ),
-            ToolParameterInfo(
-                name="neg_query",
-                param_type=ToolParamType.STRING,
-                description="负面关键词（可选）：要排除的内容，如 '男生' 或 'old man'。结果会避开与负面内容相似的笔记",
-                default=None,
             ),
             ToolParameterInfo(
                 name="limit",
@@ -1063,18 +1049,12 @@ class PromptJournalPlugin(MaiBotPlugin):
         ],
     )
     async def handle_read_notes(
-        self,
-        query: str = "",
-        neg_query: str | None = None,
-        limit: int | None = None,
-        notebook: str | None = None,
-        **kwargs: Any,
+        self, query: str = "", limit: int | None = None, notebook: str | None = None, **kwargs: Any
     ) -> dict[str, Any]:
         query = str(query or "").strip()
         if not query:
             return {"name": "read_aidraw_notes", "content": "搜索关键词不能为空"}
 
-        neg_query_text = str(neg_query or "").strip()
         nb_name = str(notebook or "").strip() or "default"
         top_k = limit if (isinstance(limit, int) and limit > 0) else self.config.journal.search_limit
         min_score = float(self.config.journal.min_score)
@@ -1084,17 +1064,8 @@ class PromptJournalPlugin(MaiBotPlugin):
             if query_vec is None:
                 return {"name": "read_aidraw_notes", "content": "搜索失败：embedding 服务不可用"}
 
-            neg_vec = None
-            if neg_query_text:
-                neg_vec = await self._embed_single(neg_query_text)
-                if neg_vec is None:
-                    return {"name": "read_aidraw_notes", "content": "搜索失败：负面关键词 embedding 服务不可用"}
-
             if nb_name == "all":
-                results = await self._search_all_notebooks(
-                    query, query_vec, top_k, min_score,
-                    neg_query_text=neg_query_text, neg_vec=neg_vec,
-                )
+                results = await self._search_all_notebooks(query, query_vec, top_k, min_score)
             else:
                 nb = self._get_notebook(nb_name)
                 if nb is None:
@@ -1102,10 +1073,7 @@ class PromptJournalPlugin(MaiBotPlugin):
                         "name": "read_aidraw_notes",
                         "content": f"笔记本 '{nb_name}' 不存在。可用笔记本: {self._list_notebook_names()}",
                     }
-                results = await self._search_single_notebook(
-                    nb, query, query_vec, top_k, min_score,
-                    neg_query_text=neg_query_text, neg_vec=neg_vec,
-                )
+                results = await self._search_single_notebook(nb, query, query_vec, top_k, min_score)
 
             if not results:
                 return {"name": "read_aidraw_notes", "content": "未找到相关笔记"}
@@ -1575,7 +1543,7 @@ class PromptJournalPlugin(MaiBotPlugin):
 
     @Command(
         "mpj_search",
-        description="搜索绘图笔记（支持 -x 负面词排除）",
+        description="搜索绘图笔记",
         pattern=r"^/mpj\s+search\s+(?P<query>.+)$",
     )
     async def handle_cmd_search(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, bool]:
@@ -1586,10 +1554,11 @@ class PromptJournalPlugin(MaiBotPlugin):
         matched_groups = kwargs.get("matched_groups", {})
         raw = str(matched_groups.get("query", "") or "").strip()
         if not raw:
-            await self.ctx.send.text("用法: /mpj search 关键词 [-x 负面词] [-n 笔记本或all]", stream_id)
+            await self.ctx.send.text("用法: /mpj search 关键词 [-n 笔记本或all]", stream_id)
             return True, "", True
 
-        query, neg_query, nb_name = self._parse_search_flags(raw)
+        query, nb_name = self._parse_notebook_flag(raw)
+        query = query.strip()
         if not query:
             await self.ctx.send.text("搜索关键词不能为空", stream_id)
             return True, "", True
@@ -1603,27 +1572,14 @@ class PromptJournalPlugin(MaiBotPlugin):
                 await self.ctx.send.text("搜索失败：embedding 服务不可用", stream_id)
                 return True, "", True
 
-            neg_vec = None
-            if neg_query:
-                neg_vec = await self._embed_single(neg_query)
-                if neg_vec is None:
-                    await self.ctx.send.text("搜索失败：负面关键词 embedding 服务不可用", stream_id)
-                    return True, "", True
-
             if nb_name == "all":
-                results = await self._search_all_notebooks(
-                    query, query_vec, top_k, min_score,
-                    neg_query_text=neg_query, neg_vec=neg_vec,
-                )
+                results = await self._search_all_notebooks(query, query_vec, top_k, min_score)
             else:
                 nb = self._get_notebook(nb_name)
                 if nb is None:
                     await self.ctx.send.text(f"笔记本 '{nb_name}' 不存在。可用: {self._list_notebook_names()}", stream_id)
                     return True, "", True
-                results = await self._search_single_notebook(
-                    nb, query, query_vec, top_k, min_score,
-                    neg_query_text=neg_query, neg_vec=neg_vec,
-                )
+                results = await self._search_single_notebook(nb, query, query_vec, top_k, min_score)
 
         if not results:
             await self.ctx.send.text("未找到相关笔记", stream_id)
@@ -1976,31 +1932,6 @@ class PromptJournalPlugin(MaiBotPlugin):
             return remaining, notebook
         return raw.strip(), "default"
 
-    @staticmethod
-    def _parse_search_flags(raw: str) -> tuple[str, str, str]:
-        """从搜索命令参数尾部提取 -x 负面词 与 -n 笔记本名，返回 (查询词, 负面词, 笔记本名)。
-
-        两个标志可任意顺序出现在尾部，例如：
-          /mpj search 猫耳 -x 男生 -n alice
-          /mpj search 猫耳 -n all -x 男生
-        """
-        import re
-
-        query = str(raw or "").strip()
-        neg = ""
-        nb = "default"
-        while True:
-            m = re.search(r"\s+-(n|x)\s+(\S+)\s*$", query)
-            if not m:
-                break
-            flag, val = m.group(1), m.group(2).strip()
-            query = query[: m.start()].strip()
-            if flag == "n":
-                nb = val
-            else:
-                neg = val
-        return query, neg, nb
-
     # ============================================================
     # WebUI 服务器
     # ============================================================
@@ -2205,7 +2136,6 @@ class PromptJournalPlugin(MaiBotPlugin):
             return web.json_response({"error": "unauthorized"}, status=401)
         query = request.query.get("q", "").strip()
         nb_name = request.query.get("notebook", "default")
-        neg_query = request.query.get("neg_q", "").strip()
         limit = max(1, min(50, int(request.query.get("limit", 10))))
         if not query:
             return web.json_response({"error": "搜索关键词不能为空"}, status=400)
@@ -2218,29 +2148,15 @@ class PromptJournalPlugin(MaiBotPlugin):
             if query_vec is None:
                 return web.json_response({"error": "embedding 服务不可用"}, status=503)
 
-            neg_vec = None
-            if neg_query:
-                neg_vec = await self._embed_single(neg_query)
-                if neg_vec is None:
-                    return web.json_response({"error": "负面关键词 embedding 服务不可用"}, status=503)
-
             if nb_name == "all":
-                results = await self._search_all_notebooks(
-                    query, query_vec, top_k, min_score,
-                    neg_query_text=neg_query, neg_vec=neg_vec,
-                )
+                results = await self._search_all_notebooks(query, query_vec, top_k, min_score)
             else:
                 nb = self._get_notebook(nb_name)
                 if nb is None:
                     return web.json_response({"error": f"笔记本 '{nb_name}' 不存在"}, status=404)
-                results = await self._search_single_notebook(
-                    nb, query, query_vec, top_k, min_score,
-                    neg_query_text=neg_query, neg_vec=neg_vec,
-                )
+                results = await self._search_single_notebook(nb, query, query_vec, top_k, min_score)
 
-        return web.json_response(
-            {"query": query, "neg_query": neg_query or None, "count": len(results), "results": results}
-        )
+        return web.json_response({"query": query, "count": len(results), "results": results})
 
     async def _web_read_body(self, request: Any) -> dict:
         import json as _json
@@ -3547,8 +3463,6 @@ class PromptJournalPlugin(MaiBotPlugin):
         query_vec: np.ndarray,
         top_k: int,
         min_score: float,
-        neg_query_text: str = "",
-        neg_vec: np.ndarray | None = None,
     ) -> list[dict[str, Any]]:
         """搜索单个笔记本。"""
         if not nb.check_consistency():
@@ -3564,10 +3478,7 @@ class PromptJournalPlugin(MaiBotPlugin):
             self.ctx.logger.warning(f"笔记本 '{nb.name}' 向量数量与条目不一致，已跳过")
             return []
 
-        results = self._cosine_topk_boosted(
-            query_text, query_vec, embeddings, entries, top_k, min_score,
-            neg_query_text=neg_query_text, neg_vec=neg_vec,
-        )
+        results = self._cosine_topk_boosted(query_text, query_vec, embeddings, entries, top_k, min_score)
         for r in results:
             r["notebook"] = nb.name
         return results
@@ -3578,8 +3489,6 @@ class PromptJournalPlugin(MaiBotPlugin):
         query_vec: np.ndarray,
         top_k: int,
         min_score: float,
-        neg_query_text: str = "",
-        neg_vec: np.ndarray | None = None,
     ) -> list[dict[str, Any]]:
         """搜索所有一致的笔记本，合并结果。"""
         all_results: list[dict[str, Any]] = []
@@ -3590,10 +3499,7 @@ class PromptJournalPlugin(MaiBotPlugin):
                 continue
             if not nb.check_consistency():
                 continue
-            results = await self._search_single_notebook(
-                nb, query_text, query_vec, top_k, min_score,
-                neg_query_text=neg_query_text, neg_vec=neg_vec,
-            )
+            results = await self._search_single_notebook(nb, query_text, query_vec, top_k, min_score)
             all_results.extend(results)
 
         all_results.sort(key=lambda x: x["score"], reverse=True)
@@ -3649,18 +3555,12 @@ class PromptJournalPlugin(MaiBotPlugin):
         entries: list[dict[str, Any]],
         top_k: int,
         min_score: float,
-        neg_query_text: str = "",
-        neg_vec: np.ndarray | None = None,
     ) -> list[dict[str, Any]]:
-        """余弦相似度搜索 + 精确匹配加分 + 可选负面扣分，返回 top-k 结果。
+        """余弦相似度搜索 + 精确匹配加分，返回 top-k 结果。
 
-        1. 向量搜索取候选（放宽阈值，扩大候选池；仅由正面 base 分决定）
+        1. 向量搜索取候选（放宽阈值，扩大候选池）
         2. 对候选用 query 做本地文本匹配加分
-        3. 若提供负面搜索（neg_query_text / neg_vec），对每个候选计算负面强度并扣分：
-           neg_strength = max(向量余弦, 文本匹配/0.30)，final = pos - _NEG_PENALTY_WEIGHT * neg_strength
-        4. 应用原始阈值 → 排序 → 取 top_k
-
-        负面不扩大候选池，只影响最终排序与过滤；neg_vec 为 None 时完全走旧逻辑。
+        3. 重新排序 → 应用原始阈值 → 取 top_k
         """
         query_lower = query_text.lower().strip()
 
@@ -3673,17 +3573,6 @@ class PromptJournalPlugin(MaiBotPlugin):
 
         base_scores = (emb_f32 @ query_vec) / (safe_norms * safe_query_norm)
 
-        # 负面向量相似度（若提供）
-        neg_sims: np.ndarray | None = None
-        neg_lower = neg_query_text.lower().strip() if neg_query_text else ""
-        if neg_vec is not None:
-            neg_f32 = np.asarray(neg_vec, dtype=np.float32).reshape(-1)
-            neg_norm = np.linalg.norm(neg_f32)
-            if neg_norm > 1e-8:
-                neg_sims = (emb_f32 @ (neg_f32 / neg_norm)) / safe_norms
-            else:
-                neg_sims = np.zeros(len(entries), dtype=np.float32)
-
         # 放宽阈值扩大候选池
         relaxed_threshold = min_score * 0.5
         valid_mask = base_scores >= relaxed_threshold
@@ -3692,23 +3581,18 @@ class PromptJournalPlugin(MaiBotPlugin):
 
         valid_indices = np.where(valid_mask)[0]
 
-        # 加分（+ 扣分）+ 重排
+        # 加分 + 重排
         scored: list[tuple[int, float]] = []
         for idx in valid_indices:
             i = int(idx)
             base = float(base_scores[i])
             entry = entries[i]
-            en_lower = entry["en"].lower().strip()
-            zh_lower = entry["zh"].lower().strip()
-            boost = self._compute_text_boost(query_lower, en_lower, zh_lower)
+            boost = self._compute_text_boost(
+                query_lower,
+                entry["en"].lower().strip(),
+                entry["zh"].lower().strip(),
+            )
             final_score = min(1.0, base + boost)
-
-            if neg_vec is not None:
-                # 负面强度 = 语义向量相似度 与 文本匹配强度 取较大者
-                neg_text_strength = self._compute_text_boost(neg_lower, en_lower, zh_lower) / _POS_TEXT_BOOST_MAX
-                neg_strength = max(float(neg_sims[i]) if neg_sims is not None else 0.0, neg_text_strength)
-                final_score -= _NEG_PENALTY_WEIGHT * neg_strength
-
             if final_score >= min_score:
                 scored.append((i, final_score))
 
