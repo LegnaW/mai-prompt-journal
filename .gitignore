@@ -5,6 +5,9 @@ config_back/
 # 本地开发备忘（含本机绝对路径，不同步仓库）
 DEV_PATHS.md
 
+# 本地计划/备忘文档（superpowers 旧计划等，不提交）
+docs/
+
 # 运行时日志
 logs/
 
