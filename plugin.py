@@ -1853,8 +1853,6 @@ class PromptJournalPlugin(MaiBotPlugin):
         pattern=r"^/mpj\s+new\s+(.+)$",
     )
     async def handle_cmd_new(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, bool]:
-        import re as _re
-
         user_id = str(kwargs.get("user_id", "") or "").strip()
         if not self._is_admin(user_id):
             return True, "", False
@@ -1864,15 +1862,32 @@ class PromptJournalPlugin(MaiBotPlugin):
         if not name:
             await self.ctx.send.text("用法: /mpj new <笔记本名>", stream_id)
             return True, "", True
+
+        ok, result = await self._create_blank_notebook(name)
+        if not ok:
+            await self.ctx.send.text(result, stream_id)
+            return True, "", True
+
+        msg = f"已创建空白笔记本 {result}，可开始添加笔记（如 /mpj add 英文|中文 -n {result}）"
+        await self.ctx.send.text(msg, stream_id)
+        return True, msg, True
+
+    async def _create_blank_notebook(self, name: str) -> tuple[bool, str]:
+        """创建空白笔记本并建好空索引，供 /mpj new 命令与 WebUI 笔记本管理页共用。
+
+        返回 (ok, name) 或 (False, 错误信息)。
+        """
+        import re as _re
+
+        name = str(name or "").strip()
+        if not name:
+            return False, "笔记本名称不能为空"
         if name == "default" or name == "tmp":
-            await self.ctx.send.text(f"笔记本名 '{name}' 不可用", stream_id)
-            return True, "", True
+            return False, f"笔记本名 '{name}' 不可用"
         if not _re.match(r"^[A-Za-z0-9_\-\u4e00-\u9fff]+$", name):
-            await self.ctx.send.text("笔记本名称只能包含中文/字母/数字/下划线/连字符", stream_id)
-            return True, "", True
+            return False, "笔记本名称只能包含中文/字母/数字/下划线/连字符"
         if self._get_notebook(name) is not None:
-            await self.ctx.send.text(f"笔记本 '{name}' 已存在", stream_id)
-            return True, "", True
+            return False, f"笔记本 '{name}' 已存在"
 
         async with self._lock:
             nb = Notebook(name, self._data_dir)
@@ -1882,13 +1897,10 @@ class PromptJournalPlugin(MaiBotPlugin):
                 await self._rebuild_notebook(nb)
             except Exception as exc:
                 self.ctx.logger.error(f"笔记本 {name} 初始化失败: {exc}", exc_info=True)
-                await self.ctx.send.text(f"创建失败：{exc}", stream_id)
-                return True, "", True
+                return False, f"创建失败：{exc}"
             self._notebooks = self._discover_notebooks()
 
-        msg = f"已创建空白笔记本 {name}，可开始添加笔记（如 /mpj add 英文|中文 -n {name}）"
-        await self.ctx.send.text(msg, stream_id)
-        return True, msg, True
+        return True, name
 
     # ============================================================
     # 指令参数解析
@@ -1964,6 +1976,7 @@ class PromptJournalPlugin(MaiBotPlugin):
             app.router.add_post("/api/import/cancel", self._web_import_cancel)
             app.router.add_get("/api/import/state", self._web_import_state)
             app.router.add_post("/api/notebooks/delete", self._web_delete_notebook)
+            app.router.add_post("/api/notebooks/create", self._web_create_notebook)
             app.router.add_get("/api/dedup/scan", self._web_dedup_scan)
             app.router.add_post("/api/dedup/resolve", self._web_dedup_resolve)
             app.router.add_post("/api/dedup/organize_preview", self._web_organize_preview)
@@ -3282,6 +3295,22 @@ class PromptJournalPlugin(MaiBotPlugin):
 
         self.ctx.logger.info(f"已删除笔记本: {name}（删除 {removed} 个文件）")
         return web.json_response({"success": True, "name": name, "removed_files": removed})
+
+    async def _web_create_notebook(self, request: Any) -> Any:
+        """新建一个空白笔记本（自动建好空索引）。"""
+        from aiohttp import web
+
+        if not self._web_check_auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        body = await self._web_read_body(request)
+        name = str(body.get("name", "") or "").strip()
+
+        ok, result = await self._create_blank_notebook(name)
+        if not ok:
+            return web.json_response({"error": result}, status=400)
+
+        self.ctx.logger.info(f"已创建空白笔记本: {result}")
+        return web.json_response({"success": True, "name": result})
 
     async def _web_organize_db_apply(self, request: Any) -> Any:
         """确认并执行 LLM 修改方案，重建索引。"""

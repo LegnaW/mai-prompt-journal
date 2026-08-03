@@ -35,7 +35,7 @@
 | `web/dedup.html` | WebUI 去重页 |
 | `web/organize.html` | WebUI 操作数据库页 |
 | `web/import.html` | WebUI txt 批量导入页 |
-| `web/notebooks.html` | WebUI 删除笔记本页 |
+| `web/notebooks.html` | WebUI 笔记本管理页（新建空白笔记本 / 删除笔记本） |
 | `web/app.js` | WebUI 共享逻辑（api/esc/登录/loadStatus/导航注入） |
 | `web/style.css` | WebUI 共享样式 |
 | `config.toml` | 运行时配置 |

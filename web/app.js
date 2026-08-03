@@ -152,7 +152,7 @@ const NAV_ITEMS = [
   { id: 'dedup', href: '/web/dedup.html', label: '去重' },
   { id: 'organize', href: '/web/organize.html', label: '操作数据库' },
   { id: 'import', href: '/web/import.html', label: '批量导入' },
-  { id: 'notebooks', href: '/web/notebooks.html', label: '删除笔记本' },
+  { id: 'notebooks', href: '/web/notebooks.html', label: '笔记本管理' },
 ];
 
 function injectNav(activeId) {
