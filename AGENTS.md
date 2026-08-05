@@ -141,7 +141,7 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 
 ### 扫描
 - `GET /api/dedup/scan?notebook=&threshold=`：L2 归一化 → 余弦相似度 → 贪心聚类（`_scan_duplicates`）。
-- **`_scan_duplicates` 分块计算相似度**：每块 `[journal].dedup_scan_block`（默认 `_DEDUP_SCAN_BLOCK=256`）行（`block = normalized[i0:i1] @ normalized.T`，`B×N` 用完即弃），内存峰值从一次性 `N×N` 降到 `B×N`，避免大笔记本扫描占满内存；只读右上三角 `j>i`（天然不含自身，无需 `fill_diagonal`），结果与一次性全矩阵计算完全一致（无符号差异，仅浮点舍入级误差）。N=5000 实测峰值 RSS ≈74MB。分块大小可在插件配置页 `[journal]` 的「去重扫描分块大小」修改（一般不需要动）。**后续改动别改回一次性 N×N 矩阵**。
+- **`_scan_duplicates` 分块计算相似度**：每块 `[advanced].dedup_scan_block`（默认 `_DEDUP_SCAN_BLOCK=256`）行（`block = normalized[i0:i1] @ normalized.T`，`B×N` 用完即弃），内存峰值从一次性 `N×N` 降到 `B×N`，避免大笔记本扫描占满内存；只读右上三角 `j>i`（天然不含自身，无需 `fill_diagonal`），结果与一次性全矩阵计算完全一致（无符号差异，仅浮点舍入级误差）。N=5000 实测峰值 RSS ≈74MB。分块大小可在插件配置页 `[advanced]` 的「去重扫描分块大小」修改（一般不需要动）。**后续改动别改回一次性 N×N 矩阵**。
 - 阈值范围 0.5~0.99（后端钳制 `max(0.5, min(0.99, ...))`），WebUI 滑块 min 同步为 0.5。
 
 ### 处理方式（`POST /api/dedup/resolve`）
@@ -173,15 +173,15 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 - `extra_params` 里若提供商支持 `{"enable_thinking": false}` 可关闭思考，从根上避免该问题。
 - embedding 仍走 `ctx.llm.embed`（保证与笔记本向量维度一致），不参与直连。
 
-### 去重整理（`config.toml` `[dedup_merge]`，重启生效）
-`enabled` / `system_prompt`（空 = 内置默认）。模型参数由 `[llm]` 节统一配置。
+### 去重整理（开关在 `[dedup_merge]`，系统提示词在 `[advanced]`，重启生效）
+`enabled`（开关）；`system_prompt` 已迁移到 `[advanced].dedup_merge_system_prompt`（空 = 内置默认）。模型参数由 `[llm]` 节统一配置。
 
 - 调用 `_direct_chat(messages)`，`messages = [system, user]`，系统提示词放在 message list 里。
 - 内置系统提示词要点：修正过度安全拒绝（绘图标签可能敏感，禁止拒绝/省略/软化）、限定输出严格 JSON（`{"reason","entries":[{en,zh,note}]}`）、明确 entries 允许 1~N 条（防止模型误以为只能输出 1 条）、禁止强行合并丢信息。
 - 解析用 `core/json_utils.py` 的 `parse_lenient_json`（状态机提取所有 `{…}` 候选 + 多级修复：`strict=False` 容忍字符串内真实换行、去尾逗号、非法转义、单引号→双引号兜底；返回 `(payload, reason)`，reason 区分 `no_json`/`truncated`/`parse_failed` 用于精确报错），失败返回 502 让前端重试。**不要改回旧的 `_extract_json` 单候选实现**。
 
-### 操作数据库（`config.toml` `[organize_db]`，多轮会话 + 后台任务）
-`enabled` / `max_iterations` / `search_limit` / `system_prompt`（空 = 内置默认）。功能名用"操作"而非"整理"（可 create/update/delete，含导入新内容）。
+### 操作数据库（开关/轮数在 `[organize_db]`，系统提示词在 `[advanced]`，多轮会话 + 后台任务）
+`enabled` / `max_iterations` / `search_limit`（在 `[organize_db]`）；`system_prompt` 已迁移到 `[advanced].organize_db_system_prompt`、`batch_import_prompt` 已迁移到 `[advanced].batch_import_prompt`（空 = 内置默认）。功能名用"操作"而非"整理"（可 create/update/delete，含导入新内容）。
 
 - **多轮会话**：`self._organize_sessions`（内存，上限 20 按 `created_at` 淘汰，`_evict_organize_sessions`）。
 - **后台任务 + 进度轮询**：`POST /api/organize_db/plan` 只做快速校验（笔记本存在/索引有效），然后 `asyncio.create_task` 跑 `_organize_db_task` 并立即返回 `{task_id}`；`GET /api/organize_db/plan_status?task_id=` 轮询进度。
@@ -201,13 +201,36 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 
 - **切分**：`_split_txt`（模块级函数）按两个及以上连续换行（`\n{2,}`）切分，段首尾 strip，忽略空段，单段也能导入。
 - **临时笔记本**：固定名 `tmp`，文件在 `data_dir/tmp_import/`（`tmp.jsonl` / `tmp.cache.jsonl` / `tmp.embeddings.npy` / `tmp.index.meta` / `import.log`），用 `Notebook("tmp", data_dir, custom_dir=tmp_import_dir)` 构造，**不参与** `_discover_notebooks`（但 `_get_notebook("tmp")` 返回它，供 `/api/modify`、`/api/delete` 编辑临时条目）。一轮完成后**不清理**；下一轮导入开始前 `_reset_tmp_import()` 清空。
-- **一段一完整循环**：`_run_import_segment` 对每段独立跑 agent 循环（多轮 search_notes），搜索范围 = 用户选择的引用笔记本 + 临时笔记本（`_execute_search_notes_multi`）；系统提示词 = `organize_db.system_prompt` + `\n` + `batch_import_prompt`（`{temp-journal}` 替换为 `tmp`，约束 LLM 只能改临时笔记本）；输出完整 create/update/delete，`_apply_ops_to_tmp` 应用后 `_rebuild_notebook(tmp)` 增量重建，下一段可见。
+- **一段一完整循环**：`_run_import_segment` 对每段独立跑 agent 循环（多轮 search_notes），搜索范围 = 用户选择的引用笔记本 + 临时笔记本（`_execute_search_notes_multi`）；系统提示词 = `advanced.organize_db_system_prompt` + `\n` + `advanced.batch_import_prompt`（`{temp-journal}` 替换为 `tmp`，约束 LLM 只能改临时笔记本）；输出完整 create/update/delete，`_apply_ops_to_tmp` 应用后 `_rebuild_notebook(tmp)` 增量重建，下一段可见。
 - **模式（附加提示词）是纯前端**：`web/import.html` 五模式单选（学习描述方式/导入oc设计/提取动作模板/提取服饰穿搭/自定义），预设直接发对应 `IMPORT_MODE_PROMPTS` 文本，自定义弹窗输入；`POST /api/import/start` 的 `mode_prompt` 字段后端仅校验非空（双重校验）。
 - **失败处理**：某段 LLM 调用/解析/写入失败 → 跳过该段，记录到 result.failed，继续下一段；导入完成后把失败汇总追加到 `import.log` 末尾。
 - **日志**：`import.log` 记录每段时间、用户输入、附加提示词、LLM 决定与理由（reason + operations）、成功/失败。
 - **处置**（`POST /api/import/resolve`）：`merge` 合并入已有笔记本（复用 tmp 向量直接追加）、`create` 新建笔记本（复制 tmp 四文件到 `imports/{new_name}.jsonl`，`_discover_notebooks` 自动发现）、`discard` 丢弃（仅清空状态，文件留给下一轮清理）。
 - **API**：`POST /api/import/preview`（切分预览）/ `POST /api/import/start` / `GET /api/import/status` / `GET /api/import/tmp_notes` / `GET /api/import/log` / `POST /api/import/resolve`。
 - 导入走通用任务中心 `_start_task("import", ...)`，与 rebuild 互斥（进行中拒绝新任务，409）；进度在导入页 + 顶部任务栏同步显示。
+
+## 配置节布局与版本迁移（v2.3.1）
+
+**当前配置节顺序**（`core/config.py` 的 `__ui_order__`）：
+
+| 顺序 | 节 | 内容 |
+|------|-----|------|
+| 0 | `[plugin]` | 开关 / `config_version`（当前 `2.3.1`） |
+| 1 | `[journal]` | 搜索条数 / 阈值 / embed 并发 / allow_write / 写入去重检测 |
+| 2 | `[admin]` | 管理员 QQ |
+| 3 | `[web]` | WebUI 开关 / 端口 / 密码 / bind |
+| 4 | `[llm]` | LLM 直连（base_url / api_key / model / ...） |
+| 5 | `[dedup_merge]` | 去重整理开关（系统提示词已迁到 `[advanced]`） |
+| 6 | `[organize_db]` | 操作数据库开关 / 轮数 / 条数 |
+| 7 | `[advanced]` | **高级**：`dedup_merge_system_prompt` / `organize_db_system_prompt` / `batch_import_prompt` / `dedup_scan_block`（默认不建议改） |
+
+**配置迁移机制（重要，勿破坏）**：
+- host 在 `config_version` **升高**时，以最新默认配置为骨架重建并写回文件（runner_main `_prepare_plugin_config_for_version_update`）；键路径不变的旧值自动保留，**被删除的键值会在进入钩子前被丢弃**。
+- 插件主类实现了 `normalize_plugin_config`（`plugin.py`），负责"跨节搬字段 + 删旧键"，当前迁移对：
+  `dedup_merge.system_prompt → advanced.dedup_merge_system_prompt`、`organize_db.system_prompt → advanced.organize_db_system_prompt`、`organize_db.batch_import_prompt → advanced.batch_import_prompt`、`journal.dedup_scan_block → advanced.dedup_scan_block`。
+- **两阶段迁移惯例**：搬字段时，旧字段先在模型里保留并标 `json_schema_extra={"hidden": True}`（WebUI 自动隐藏），配合钩子把旧值搬进新节并删除旧键；下一版本再删掉废弃 hidden 字段并再次 bump `config_version`。
+- **规则**：只加字段 → 可 bump 可不 bump；删字段 / 搬字段 / 改键路径 → **必须 bump `config_version`**，否则旧值会在重建时被静默丢弃。
+- 部署升级验证：插件重载后检查 `config.toml` 是否生成 `[advanced]`、旧节字段是否清理、版本是否自动升到 `2.3.1`。
 
 ## 命令规范
 
@@ -322,5 +345,5 @@ schema = generate_plugin_config_schema(m.PromptJournalConfig)
 - **LLM 生成走 `_direct_chat`，不要改回 `ctx.llm.generate`**；新增 `ctx.*` 调用记得同步 `_manifest.json` 能力声明（当前仅 `llm.embed` + `send.text`）
 - 修改 `_direct_chat` / agent 循环时注意 **`reasoning_content` 回传** 与 **`tool_calls[].function.arguments` 是 JSON 字符串需 `json.loads`** 两个要点（见"LLM 生成统一走直连 API"）
 - 改配置模型字段时，若只是加 `json_schema_extra` 元数据，**无需 bump `config_version`**（config.toml 里值不变）
-- `[dedup_merge]` / `[organize_db]` / `[llm]` 配置改动需重启插件生效（`self.config` 加载时读取，无热更新）
+- `[dedup_merge]` / `[organize_db]` / `[advanced]` / `[llm]` 配置改动需重启插件生效（`self.config` 加载时读取，无热更新）
 - 改 `_manifest.json` capabilities 后必须**重载插件**才会重新注册能力令牌（否则 E_CAPABILITY_DENIED）
