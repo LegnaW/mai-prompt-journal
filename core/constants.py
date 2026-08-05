@@ -1,5 +1,11 @@
 """模块级常量：LLM 提示词、工具名、WebUI 阈值等。"""
 
+from pathlib import Path
+
+# 插件根目录与 WebUI 静态资源目录（本模块位于 core/ 下，需向上两级）
+_PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+_WEB_DIR = _PLUGIN_ROOT / "web"
+
 _ORGANIZE_DEFAULT_REQUIREMENT = "把上述重复的提示词笔记合并整理，默认输出一条合并结果，若有需要也可以输出2到3条"
 
 _WRITE_TOOL_NAMES = ["add_aidraw_notes", "modify_aidraw_note", "delete_aidraw_note"]

@@ -4,12 +4,11 @@ import asyncio
 import json
 import time
 import uuid
-from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from .constants import _DEDUP_SCAN_BLOCK, _WEBUI_SESSION_TTL, _WEBUI_WARNING_HTML
+from .constants import _DEDUP_SCAN_BLOCK, _WEBUI_SESSION_TTL, _WEBUI_WARNING_HTML, _WEB_DIR
 from .notebook import Notebook, scramble_id
 
 class WebUIMixin:
@@ -45,7 +44,7 @@ class WebUIMixin:
         else:
             app.router.add_get("/", self._web_index)
             # 静态资源（多页面的 css/js/html）
-            web_dir = Path(__file__).parent / "web"
+            web_dir = _WEB_DIR
             if web_dir.is_dir():
                 app.router.add_static("/web/", web_dir)
             app.router.add_post("/api/login", self._web_login)
@@ -118,7 +117,7 @@ class WebUIMixin:
         """返回 WebUI 首页 HTML，始终返回 HTML，认证由 API 端点处理。"""
         from aiohttp import web
 
-        html_path = Path(__file__).parent / "web" / "index.html"
+        html_path = _WEB_DIR / "index.html"
         if html_path.exists():
             html = html_path.read_text(encoding="utf-8")
         else:
