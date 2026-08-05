@@ -62,9 +62,3 @@ textarea::placeholder { color: #bbb; }
 .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
 .two-col .col { background: #fafbfc; border: 1px solid #eee; border-radius: 8px; padding: 12px; }
 @media (max-width: 700px) { .two-col { grid-template-columns: 1fr; } }
-
-/* 传输进行中的不确定进度条动画 */
-@keyframes mpj-busy {
-  0% { margin-left: -40%; }
-  100% { margin-left: 100%; }
-}

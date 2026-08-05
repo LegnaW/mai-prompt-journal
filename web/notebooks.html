@@ -332,12 +332,9 @@ function stopTransferPolling() {
 function transferBusyHtml(progress, label) {
   const p = progress || {};
   const done = p.done || 0, total = p.total || 0;
-  const pct = total > 0 ? Math.round(done / total * 100) : 0;
+  const counter = total > 0 ? `（${done}/${total}）` : '';
   return `<div style="line-height:1.7;">
-    <p>${label}${total > 0 ? `（${done}/${total}）` : ''}</p>
-    ${total > 0 ? `<div style="background:#eee;border-radius:4px;height:10px;margin:6px 0;">
-      <div style="background:#4f9afe;height:10px;border-radius:4px;width:${pct}%;transition:width .3s;"></div>
-    </div>` : '<div style="background:#eee;border-radius:4px;height:10px;margin:6px 0;overflow:hidden;"><div style="background:#4f9afe;height:10px;width:40%;animation:mpj-busy 1.2s ease-in-out infinite;"></div></div>'}
+    <p>${label}${counter}</p>
     <button class="btn btn-outline btn-sm" onclick="cancelTransfer()">取消</button>
   </div>`;
 }

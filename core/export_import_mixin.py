@@ -143,7 +143,7 @@ class ExportImportMixin:
         except Exception:
             return {}
 
-    async def _embed_with_progress(self, texts: list[str], chunk: int = 64) -> np.ndarray | None:
+    async def _embed_with_progress(self, texts: list[str], chunk: int = 8) -> np.ndarray | None:
         """分批内置 embedding 并写进度到 file_io/progress.json，返回矩阵或 None。"""
         total = len(texts)
         if total == 0:
@@ -296,7 +296,7 @@ class ExportImportMixin:
         texts = [self._build_embedding_text(e["en"], e["zh"], e["note"]) for e in entries]
         total = len(texts)
         vectors: list[list[float]] = []
-        for i in range(0, total, 64):
+        for i in range(0, total, 8):
             part = await client.embed(texts[i : i + 64])
             if part is None:
                 raise RuntimeError("第三方 embedding 调用失败，请检查配置或网络")
