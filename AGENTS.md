@@ -36,6 +36,7 @@
 | `core/notebook.py` | `Notebook` 数据模型 + `scramble_id` / `_split_txt` |
 | `core/search_mixin.py` | `SearchMixin`：向量搜索、索引重建、embedding 助手、写入去重检测 |
 | `core/organize_mixin.py` | `OrganizeMixin`：LLM 直连、去重整理、操作数据库、批量导入的 agent 循环 |
+| `core/json_utils.py` | 宽容 JSON 解析（`parse_lenient_json`：多候选提取 + strict=False/去尾逗号/非法转义/单引号修复） |
 | `core/webui_mixin.py` | `WebUIMixin`：WebUI 服务器 + 全部 API + 后台任务中心 + 去重扫描 |
 | `web/index.html` | WebUI 首页（状态栏 + 搜索/浏览 + 添加） |
 | `web/dedup.html` | WebUI 去重页 |
@@ -177,7 +178,7 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 
 - 调用 `_direct_chat(messages)`，`messages = [system, user]`，系统提示词放在 message list 里。
 - 内置系统提示词要点：修正过度安全拒绝（绘图标签可能敏感，禁止拒绝/省略/软化）、限定输出严格 JSON（`{"reason","entries":[{en,zh,note}]}`）、明确 entries 允许 1~N 条（防止模型误以为只能输出 1 条）、禁止强行合并丢信息。
-- 解析用 `_extract_json`（剥代码围栏 + 括号配对取首个 JSON 对象），失败返回 502 让前端重试。
+- 解析用 `core/json_utils.py` 的 `parse_lenient_json`（状态机提取所有 `{…}` 候选 + 多级修复：`strict=False` 容忍字符串内真实换行、去尾逗号、非法转义、单引号→双引号兜底；返回 `(payload, reason)`，reason 区分 `no_json`/`truncated`/`parse_failed` 用于精确报错），失败返回 502 让前端重试。**不要改回旧的 `_extract_json` 单候选实现**。
 
 ### 操作数据库（`config.toml` `[organize_db]`，多轮会话 + 后台任务）
 `enabled` / `max_iterations` / `search_limit` / `system_prompt`（空 = 内置默认）。功能名用"操作"而非"整理"（可 create/update/delete，含导入新内容）。

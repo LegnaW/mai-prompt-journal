@@ -13,7 +13,20 @@ from .constants import (
     _ORGANIZE_DB_SEARCH_TOOL,
     _ORGANIZE_DEFAULT_REQUIREMENT,
 )
+from .json_utils import parse_lenient_json
 from .notebook import scramble_id
+
+_JSON_PARSE_HINTS = {
+    "no_json": "LLM 返回内容中没有找到 JSON",
+    "truncated": "LLM 返回内容疑似被截断（JSON 未闭合）",
+    "parse_failed": "LLM 返回内容无法解析为 JSON",
+}
+
+
+def _format_json_parse_error(reason: str | None, response_text: str) -> str:
+    """把解析失败原因格式化为给用户/日志的中文提示。"""
+    hint = _JSON_PARSE_HINTS.get(reason or "", "LLM 返回内容无法解析为 JSON")
+    return f"{hint}，完整输出：\n{response_text}"
 
 class OrganizeMixin:
 
@@ -152,10 +165,10 @@ class OrganizeMixin:
             self.ctx.logger.warning("LLM 整理返回空内容")
             return {"_error": "llm", "message": "LLM 返回空内容"}
 
-        payload = self._extract_json(response_text)
+        payload, parse_reason = parse_lenient_json(response_text)
         if payload is None:
             self.ctx.logger.warning(f"LLM 整理返回无法解析的 JSON: {response_text[:200]}")
-            return {"_error": "llm", "message": f"LLM 返回内容无法解析为 JSON，完整输出：\n{response_text}"}
+            return {"_error": "llm", "message": _format_json_parse_error(parse_reason, response_text)}
 
         reason = str(payload.get("reason", "") or "").strip()
         raw_entries = payload.get("entries")
@@ -178,45 +191,6 @@ class OrganizeMixin:
             return {"_error": "llm", "message": f"LLM 返回的条目缺少 en/zh，完整输出：\n{response_text}"}
 
         return {"reason": reason, "entries": clean_entries}
-
-    @staticmethod
-    def _extract_json(text: str) -> dict[str, Any] | None:
-        """从 LLM 回复中提取第一个 JSON 对象。"""
-        stripped = text.strip()
-        if stripped.startswith("```"):
-            stripped = stripped.strip("`")
-            if stripped.startswith("json"):
-                stripped = stripped[len("json") :].lstrip()
-            if stripped.startswith("{"):
-                stripped = stripped.strip("`")
-        start = stripped.find("{")
-        if start == -1:
-            return None
-        depth = 0
-        in_string = False
-        escape = False
-        for i in range(start, len(stripped)):
-            ch = stripped[i]
-            if in_string:
-                if escape:
-                    escape = False
-                elif ch == "\\":
-                    escape = True
-                elif ch == '"':
-                    in_string = False
-                continue
-            if ch == '"':
-                in_string = True
-            elif ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return json.loads(stripped[start : i + 1])
-                    except json.JSONDecodeError:
-                        return None
-        return None
 
     async def _execute_search_notes(self, keyword: str, notebook_name: str = "", limit: int = 10) -> str:
         """执行 search_notes 工具：按关键词语义检索笔记，返回文本结果。"""
@@ -362,10 +336,10 @@ class OrganizeMixin:
             if not response_text:
                 self.ctx.logger.warning("LLM 操作数据库返回空内容")
                 return None, messages, "LLM 返回空内容"
-            payload = self._extract_json(response_text)
+            payload, parse_reason = parse_lenient_json(response_text)
             if payload is None:
                 self.ctx.logger.warning(f"LLM 操作数据库返回无法解析的 JSON: {response_text[:200]}")
-                return None, messages, f"LLM 返回内容无法解析为 JSON，完整输出：\n{response_text}"
+                return None, messages, _format_json_parse_error(parse_reason, response_text)
             raw_ops = payload.get("operations")
             if not isinstance(raw_ops, list):
                 self.ctx.logger.warning(f"LLM 操作数据库返回的 operations 无效: {response_text[:200]}")
@@ -644,9 +618,9 @@ class OrganizeMixin:
             response_text = str(result.get("content", "") or "").strip()
             if not response_text:
                 return {"ok": False, "error": "LLM 返回空内容"}
-            payload = self._extract_json(response_text)
+            payload, parse_reason = parse_lenient_json(response_text)
             if payload is None:
-                return {"ok": False, "error": f"LLM 返回内容无法解析为 JSON，完整输出：\n{response_text}"}
+                return {"ok": False, "error": _format_json_parse_error(parse_reason, response_text)}
             raw_ops = payload.get("operations")
             if not isinstance(raw_ops, list):
                 return {"ok": False, "error": f"LLM 返回的 operations 无效，完整输出：\n{response_text}"}
