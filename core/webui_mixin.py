@@ -74,6 +74,9 @@ class WebUIMixin:
             app.router.add_post("/api/organize_db/plan", self._web_organize_db_plan)
             app.router.add_get("/api/organize_db/plan_status", self._web_organize_db_plan_status)
             app.router.add_post("/api/organize_db/apply", self._web_organize_db_apply)
+            app.router.add_get("/api/backups", self._web_backups_list)
+            app.router.add_post("/api/backups/restore", self._web_backups_restore)
+            app.router.add_post("/api/backups/delete", self._web_backups_delete)
 
         self._web_runner = web.AppRunner(app)
         await self._web_runner.setup()
@@ -286,6 +289,7 @@ class WebUIMixin:
         async with self._lock:
             nb.append_entries(valid_entries, embeddings)
             nb.update_md5()
+            self._create_backup(nb)
 
         return web.json_response({"success": True, "added": len(valid_entries), "notebook": nb_name})
 
@@ -340,6 +344,7 @@ class WebUIMixin:
 
             nb.rewrite_all(entries, embeddings)
             nb.update_md5()
+            self._create_backup(nb)
 
         return web.json_response({"success": True})
 
@@ -374,6 +379,7 @@ class WebUIMixin:
                 embeddings = np.delete(embeddings, target_idx, axis=0)
             nb.rewrite_all(entries, embeddings)
             nb.update_md5()
+            self._create_backup(nb)
 
         return web.json_response({"success": True, "remaining": nb.count_notes()})
 
@@ -619,6 +625,7 @@ class WebUIMixin:
                 return web.json_response(
                     {"error": "处理已写入源文件，但索引重建失败，请执行 /mpj rebuild"}, status=500
                 )
+            self._create_backup(nb)
 
             groups = self._scan_duplicates(nb.load_notes(), nb.load_embeddings(), threshold)
 
@@ -952,6 +959,7 @@ class WebUIMixin:
                     return web.json_response({"error": "临时笔记本向量不完整，无法合并"}, status=400)
                 nb.append_entries(entries, embeddings)
                 nb.update_md5()
+                self._create_backup(nb)
                 # 标记导入完成（抗刷新/抗重启）
                 self._tmp_finished_path.write_text("", encoding="utf-8")
                 return web.json_response(
@@ -1091,6 +1099,62 @@ class WebUIMixin:
         self.ctx.logger.info(f"已创建空白笔记本: {result}")
         return web.json_response({"success": True, "name": result})
 
+    async def _web_backups_list(self, request: Any) -> Any:
+        """列出笔记本的备份。"""
+        from aiohttp import web
+
+        if not self._web_check_auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        nb_name = str(request.query.get("notebook", "default") or "default").strip()
+        nb = self._get_notebook(nb_name)
+        if nb is None:
+            return web.json_response({"error": f"笔记本 '{nb_name}' 不存在"}, status=404)
+        backups = self._list_backups(nb)
+        return web.json_response({"notebook": nb_name, "backups": backups, "total": len(backups)})
+
+    async def _web_backups_restore(self, request: Any) -> Any:
+        """恢复笔记本到指定备份。"""
+        from aiohttp import web
+
+        if not self._web_check_auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        body = await self._web_read_body(request)
+        nb_name = str(body.get("notebook", "") or "").strip() or "default"
+        timestamp = str(body.get("timestamp", "") or "").strip()
+        if not timestamp:
+            return web.json_response({"error": "timestamp 不能为空"}, status=400)
+
+        nb = self._get_notebook(nb_name)
+        if nb is None:
+            return web.json_response({"error": f"笔记本 '{nb_name}' 不存在"}, status=404)
+
+        async with self._lock:
+            ok, msg = await self._restore_backup(nb, timestamp)
+        if not ok:
+            return web.json_response({"error": msg}, status=400)
+        return web.json_response({"success": True, "message": msg})
+
+    async def _web_backups_delete(self, request: Any) -> Any:
+        """删除一个备份。"""
+        from aiohttp import web
+
+        if not self._web_check_auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        body = await self._web_read_body(request)
+        nb_name = str(body.get("notebook", "") or "").strip() or "default"
+        timestamp = str(body.get("timestamp", "") or "").strip()
+        if not timestamp:
+            return web.json_response({"error": "timestamp 不能为空"}, status=400)
+
+        nb = self._get_notebook(nb_name)
+        if nb is None:
+            return web.json_response({"error": f"笔记本 '{nb_name}' 不存在"}, status=404)
+
+        ok, msg = self._delete_backup(nb, timestamp)
+        if not ok:
+            return web.json_response({"error": msg}, status=400)
+        return web.json_response({"success": True, "message": msg})
+
     async def _web_organize_db_apply(self, request: Any) -> Any:
         """确认并执行 LLM 修改方案，重建索引。"""
         from aiohttp import web
@@ -1167,6 +1231,7 @@ class WebUIMixin:
                 return web.json_response(
                     {"error": "方案已写入源文件，但索引重建失败，请执行 /mpj rebuild"}, status=500
                 )
+            self._create_backup(nb)
 
             # 应用成功后清除该会话，防止继续追加产生过期方案
             if session_id:

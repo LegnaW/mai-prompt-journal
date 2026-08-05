@@ -24,6 +24,7 @@ from maibot_sdk import (
 )
 from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
+from .core.backup_mixin import BackupMixin
 from .core.config import PromptJournalConfig
 from .core.constants import _WRITE_TOOL_NAMES
 from .core.notebook import Notebook, scramble_id
@@ -31,7 +32,7 @@ from .core.organize_mixin import OrganizeMixin
 from .core.search_mixin import SearchMixin
 from .core.webui_mixin import WebUIMixin
 
-class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin):
+class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin, BackupMixin):
     """麦麦的绘图笔记本插件。"""
 
     config_model = PromptJournalConfig
@@ -362,6 +363,7 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin):
                 accepted_emb = embeddings[accepted_indices]
                 nb.append_entries(accepted_entries, accepted_emb)
                 nb.update_md5()
+                self._create_backup(nb)
 
             count = nb.count_notes()
             parts: list[str] = []
@@ -617,6 +619,7 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin):
 
             nb.rewrite_all(entries, embeddings)
             nb.update_md5()
+            self._create_backup(nb)
 
             self.ctx.logger.info(f"修改笔记成功: notebook={nb_name} id={clean_id}")
             return {
@@ -689,6 +692,7 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin):
 
             nb.rewrite_all(entries, embeddings)
             nb.update_md5()
+            self._create_backup(nb)
 
             count = nb.count_notes()
             self.ctx.logger.info(f"删除笔记成功: notebook={nb_name} id={clean_id} 剩余={count}")
@@ -805,6 +809,14 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin):
             "  /mpj rebuild --full",
             "    全量重建（忽略缓存，全部重新计算向量，换模型后使用）",
             "",
+            "📦 备份：",
+            "  /mpj backup list [-n 笔记本]",
+            "    查看笔记本备份",
+            "  /mpj backup restore 时间戳 [-n 笔记本]",
+            "    恢复备份（恢复前自动备份当前状态）",
+            "  /mpj backup delete 时间戳 [-n 笔记本]",
+            "    删除备份",
+            "",
             "  /mpj help",
             "    显示此帮助信息",
         ]
@@ -881,6 +893,7 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin):
 
             nb.append_entries([entry], emb.reshape(1, -1))
             nb.update_md5()
+            self._create_backup(nb)
 
         count = nb.count_notes()
         msg = f"已添加到 {nb_name}（当前共 {count} 条）：{en} / {zh}"
@@ -1043,6 +1056,7 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin):
 
             nb.rewrite_all(entries, embeddings)
             nb.update_md5()
+            self._create_backup(nb)
 
         await self.ctx.send.text(f"已修改笔记 {note_id}（笔记本: {nb_name}）", stream_id)
         return True, "", True
@@ -1095,6 +1109,7 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin):
                 embeddings = np.delete(embeddings, target_idx, axis=0)
             nb.rewrite_all(entries, embeddings)
             nb.update_md5()
+            self._create_backup(nb)
 
         count = nb.count_notes()
         await self.ctx.send.text(f"已删除笔记 {note_id}（笔记本: {nb_name}），剩余 {count} 条", stream_id)
@@ -1150,6 +1165,7 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin):
                     return True, "", True
                 nb.append_entries([entry], emb.reshape(1, -1))
                 nb.update_md5()
+                self._create_backup(nb)
                 count = nb.count_notes()
                 msg = f"已确认写入 {nb_name}（当前共 {count} 条）：{en} / {zh}"
                 if note:
@@ -1187,6 +1203,7 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin):
                             embeddings = emb_f16
                 nb.rewrite_all(entries, embeddings)
                 nb.update_md5()
+                self._create_backup(nb)
                 await self.ctx.send.text(f"已确认修改笔记 {note_id}（笔记本: {nb_name}）", stream_id)
                 return True, "", True
 
@@ -1247,6 +1264,97 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin):
             self._notebooks = self._discover_notebooks()
 
         return True, name
+
+    # ============================================================
+    # 管理员命令：/mpj backup
+    # ============================================================
+
+    @Command(
+        "mpj_backup_list",
+        description="查看笔记本备份列表",
+        pattern=r"^/mpj\s+backup\s+list(?:\s+(?P<rest>.+))?$",
+    )
+    async def handle_cmd_backup_list(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, bool]:
+        user_id = str(kwargs.get("user_id", "") or "").strip()
+        if not self._is_admin(user_id):
+            return True, "", False
+
+        matched_groups = kwargs.get("matched_groups", {})
+        raw = str(matched_groups.get("rest", "") or "").strip()
+        _content, nb_name = self._parse_notebook_flag(raw)
+
+        nb = self._get_notebook(nb_name)
+        if nb is None:
+            await self.ctx.send.text(f"笔记本 '{nb_name}' 不存在。可用: {self._list_notebook_names()}", stream_id)
+            return True, "", True
+
+        backups = self._list_backups(nb)
+        if not backups:
+            await self.ctx.send.text(f"笔记本 '{nb_name}' 暂无备份", stream_id)
+            return True, "", True
+
+        lines = [f"📦 笔记本 '{nb_name}' 备份（{len(backups)} 份）："]
+        for b in backups:
+            lines.append(f"- {b['timestamp']} | {b['count']} 条 | {b['size']} B")
+        msg = "\n".join(lines)
+        await self.ctx.send.text(msg, stream_id)
+        return True, msg, True
+
+    @Command(
+        "mpj_backup_restore",
+        description="恢复笔记本备份",
+        pattern=r"^/mpj\s+backup\s+restore\s+(?P<rest>.+)$",
+    )
+    async def handle_cmd_backup_restore(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, bool]:
+        user_id = str(kwargs.get("user_id", "") or "").strip()
+        if not self._is_admin(user_id):
+            return True, "", False
+
+        matched_groups = kwargs.get("matched_groups", {})
+        raw = str(matched_groups.get("rest", "") or "").strip()
+        content, nb_name = self._parse_notebook_flag(raw)
+        timestamp = content.strip()
+        if not timestamp:
+            await self.ctx.send.text("用法: /mpj backup restore <时间戳> [-n 笔记本]", stream_id)
+            return True, "", True
+
+        nb = self._get_notebook(nb_name)
+        if nb is None:
+            await self.ctx.send.text(f"笔记本 '{nb_name}' 不存在。可用: {self._list_notebook_names()}", stream_id)
+            return True, "", True
+
+        async with self._lock:
+            ok, msg = await self._restore_backup(nb, timestamp)
+        await self.ctx.send.text(msg, stream_id)
+        return True, msg, True
+
+    @Command(
+        "mpj_backup_delete",
+        description="删除笔记本备份",
+        pattern=r"^/mpj\s+backup\s+delete\s+(?P<rest>.+)$",
+    )
+    async def handle_cmd_backup_delete(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, bool]:
+        user_id = str(kwargs.get("user_id", "") or "").strip()
+        if not self._is_admin(user_id):
+            return True, "", False
+
+        matched_groups = kwargs.get("matched_groups", {})
+        raw = str(matched_groups.get("rest", "") or "").strip()
+        content, nb_name = self._parse_notebook_flag(raw)
+        timestamp = content.strip()
+        if not timestamp:
+            await self.ctx.send.text("用法: /mpj backup delete <时间戳> [-n 笔记本]", stream_id)
+            return True, "", True
+
+        nb = self._get_notebook(nb_name)
+        if nb is None:
+            await self.ctx.send.text(f"笔记本 '{nb_name}' 不存在。可用: {self._list_notebook_names()}", stream_id)
+            return True, "", True
+
+        async with self._lock:
+            ok, msg = self._delete_backup(nb, timestamp)
+        await self.ctx.send.text(msg, stream_id)
+        return True, msg, True
 
     @staticmethod
     def _parse_notebook_flag(raw: str) -> tuple[str, str]:

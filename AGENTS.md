@@ -37,17 +37,19 @@
 | `core/search_mixin.py` | `SearchMixin`：向量搜索、索引重建、embedding 助手、写入去重检测 |
 | `core/organize_mixin.py` | `OrganizeMixin`：LLM 直连、去重整理、操作数据库、批量导入的 agent 循环 |
 | `core/json_utils.py` | 宽容 JSON 解析（`parse_lenient_json`：多候选提取 + strict=False/去尾逗号/非法转义/单引号修复） |
+| `core/backup_mixin.py` | `BackupMixin`：笔记本自动备份（创建/列表/恢复/删除/上限淘汰，`data_dir/backups/{name}/{时间戳}.jsonl`） |
 | `core/webui_mixin.py` | `WebUIMixin`：WebUI 服务器 + 全部 API + 后台任务中心 + 去重扫描 |
 | `web/index.html` | WebUI 首页（状态栏 + 搜索/浏览 + 添加） |
 | `web/dedup.html` | WebUI 去重页 |
 | `web/organize.html` | WebUI 操作数据库页 |
 | `web/import.html` | WebUI txt 批量导入页 |
 | `web/notebooks.html` | WebUI 笔记本管理页（新建空白笔记本 / 删除笔记本） |
+| `web/backups.html` | WebUI 备份页（查看/恢复/删除备份） |
 | `web/app.js` | WebUI 共享逻辑（api/esc/登录/loadStatus/导航注入 + 全局导航右侧的刷新/重建索引/全量重构索引按钮） |
 | `web/style.css` | WebUI 共享样式 |
 | `config.toml` | 运行时配置 |
 
-**架构说明**：主类 `PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin)` 通过 mixin 拆分业务，SDK 用 `dir(instance)` 收集组件，继承方法可正常注册。加载器以 `plugin.py` 为入口（`submodule_search_locations`），`core/` 下用**相对导入**（`from .core.config import ...`，与 maimai-drawpic-plugin 同款）。新增逻辑时：配置字段加在 `core/config.py`，通用工具/存储放 `core/notebook.py` 或新增 `core/*.py`，WebUI 处理器加进 `WebUIMixin`，agent 循环加进 `OrganizeMixin`，搜索相关加进 `SearchMixin`。
+**架构说明**：主类 `PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin, BackupMixin)` 通过 mixin 拆分业务，SDK 用 `dir(instance)` 收集组件，继承方法可正常注册。加载器以 `plugin.py` 为入口（`submodule_search_locations`），`core/` 下用**相对导入**（`from .core.config import ...`，与 maimai-drawpic-plugin 同款）。新增逻辑时：配置字段加在 `core/config.py`，通用工具/存储放 `core/notebook.py` 或新增 `core/*.py`，WebUI 处理器加进 `WebUIMixin`，agent 循环加进 `OrganizeMixin`，搜索相关加进 `SearchMixin`，备份相关加进 `BackupMixin`。
 
 WebUI 为多页面静态站点（无构建步骤）：`/` 返回 `web/index.html`，`/web/` 目录由 `_run_web_server` 中 `app.router.add_static("/web/", web_dir)` 提供服务。新增功能页 = 新建 `web/*.html` + 在 `app.js` 的 `NAV_ITEMS` 加导航项，并在页面底部调用 `injectNav('<id>')` + `loadStatus()`。
 
@@ -223,6 +225,7 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 | 5 | `[dedup_merge]` | 去重整理开关（系统提示词已迁到 `[advanced]`） |
 | 6 | `[organize_db]` | 操作数据库开关 / 轮数 / 条数 |
 | 7 | `[advanced]` | **高级**：`dedup_merge_system_prompt` / `organize_db_system_prompt` / `batch_import_prompt` / `dedup_scan_block`（默认不建议改） |
+| 8 | `[backup]` | 备份：`enabled`（默认 true）/ `max_per_notebook`（默认 6） |
 
 **配置迁移机制（重要，勿破坏）**：
 - host 在 `config_version` **升高**时，以最新默认配置为骨架重建并写回文件（runner_main `_prepare_plugin_config_for_version_update`）；键路径不变的旧值自动保留，**被删除的键值会在进入钩子前被丢弃**。
@@ -238,6 +241,9 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 - **非管理员静默无视**：`return True, "", False`（不发消息、不报错）
 - 笔记本名称统一用 `-n xxx` 后缀语法，`_parse_notebook_flag()` 解析
 - `search` 支持 `-n all` 跨笔记本搜索
+- `/mpj backup list/restore/delete`：`backup` 子命令用命名组 `(?P<rest>.+)`（restore/delete 的时间戳在 rest 里，`_parse_notebook_flag` 再剥 `-n`）
+
+**备份触发约定（重要）**：`[backup]` 自动备份要求在**每个成功写入源文件后的路径**调用 `self._create_backup(nb)`。当前已覆盖：工具 add/modify/delete ×3、`/mpj add/modify/delete/confirm` ×5、WebUI `_web_add/modify/delete`、`_web_dedup_resolve`、`_web_organize_db_apply`、`_web_import_resolve`（merge）——**新增写入路径必须补上**，否则该路径不会自动备份。`tmp` 临时笔记本与 `_web_create_notebook`（新建空）不备份。
 
 ### 坑：命令正则必须用**命名捕获组**
 宿主 `find_command_by_text`（`src/plugin_runtime/host/component_registry.py`）匹配命令后只回传 `m.groupdict()`（命名捕获组 dict）。**位置捕获组 `(.+)` 的 group 1 取不到**，`matched_groups.get(1)` 恒为空 → 命令永远走"用法"提示分支。

@@ -153,6 +153,7 @@ const NAV_ITEMS = [
   { id: 'organize', href: '/web/organize.html', label: '操作数据库' },
   { id: 'import', href: '/web/import.html', label: '批量导入' },
   { id: 'notebooks', href: '/web/notebooks.html', label: '笔记本管理' },
+  { id: 'backups', href: '/web/backups.html', label: '备份' },
 ];
 
 function injectNav(activeId) {

@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>备份 - 麦麦的绘图笔记本</title>
+<link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+<div class="container">
+  <div id="nav"></div>
+
+  <div class="card">
+    <div class="row" style="justify-content: space-between; margin-bottom: 8px;">
+      <strong>笔记本备份</strong>
+      <button class="btn btn-outline btn-sm" onclick="loadBackups()">刷新</button>
+    </div>
+    <div style="font-size:12px;color:#999;margin-bottom:10px;line-height:1.7;">
+      每次笔记本被修改后会自动按时间戳创建一份备份（上限可在插件配置『备份』分类调整，超出自动删除最旧）。恢复会把笔记本源文件还原到所选备份并重建索引；恢复前会自动先备份当前状态，便于撤销。
+    </div>
+
+    <div class="row" style="margin-bottom: 12px;">
+      <label>笔记本:</label>
+      <select id="backupNotebook" class="notebook-select" onchange="loadBackups()"><option value="default">default</option></select>
+    </div>
+
+    <div id="backupResults"></div>
+  </div>
+</div>
+
+<script src="/web/app.js"></script>
+<script>
+function loadNotebooks() {
+  api('GET', '/api/status').then(data => {
+    const sel = document.getElementById('backupNotebook');
+    const current = sel.value || 'default';
+    sel.innerHTML = (data.notebooks || []).map(n => `<option value="${esc(n.name)}">${esc(n.name)}</option>`).join('') || '<option value="default">default</option>';
+    sel.value = current;
+    loadBackups();
+  }).catch(() => {});
+}
+
+function loadBackups() {
+  const nb = document.getElementById('backupNotebook').value;
+  const div = document.getElementById('backupResults');
+  div.innerHTML = '<p style="color:#999">加载中...</p>';
+  api('GET', `/api/backups?notebook=${encodeURIComponent(nb)}`).then(data => {
+    if (data.error) { div.innerHTML = `<p style="color:#c62828">${esc(data.error)}</p>`; return; }
+    if (!data.backups || data.backups.length === 0) {
+      div.innerHTML = '<p style="color:#2e7d32">暂无备份。笔记本被修改后会自动生成。</p>';
+      return;
+    }
+    div.innerHTML = `<p style="color:#333;margin-bottom:6px;">共 ${data.backups.length} 份备份：</p>
+      <table>
+        <thead><tr><th>时间</th><th>条目数</th><th>大小</th><th>操作</th></tr></thead>
+        <tbody>` +
+      data.backups.map(b => `<tr>
+        <td>${esc(b.timestamp)}</td>
+        <td>${b.count}</td>
+        <td>${b.size} B</td>
+        <td>
+          <button class="btn btn-sm" onclick="doRestore('${esc(b.timestamp)}')">恢复</button>
+          <button class="btn btn-danger btn-sm" onclick="doDelete('${esc(b.timestamp)}')">删除</button>
+        </td>
+      </tr>`).join('') + '</tbody></table>';
+  }).catch(() => {});
+}
+
+function doRestore(timestamp) {
+  const nb = document.getElementById('backupNotebook').value;
+  if (!confirm(`确认将笔记本「${nb}」恢复到备份 ${timestamp}？恢复前会自动备份当前状态。`)) return;
+  api('POST', '/api/backups/restore', { notebook: nb, timestamp: timestamp }).then(data => {
+    if (data.error) { alert(data.error); return; }
+    alert(data.message || '已恢复');
+    loadBackups();
+    loadStatus();
+  }).catch(() => {});
+}
+
+function doDelete(timestamp) {
+  const nb = document.getElementById('backupNotebook').value;
+  if (!confirm(`确认删除备份 ${timestamp}？`)) return;
+  api('POST', '/api/backups/delete', { notebook: nb, timestamp: timestamp }).then(data => {
+    if (data.error) { alert(data.error); return; }
+    alert(data.message || '已删除');
+    loadBackups();
+  }).catch(() => {});
+}
+
+injectNav('backups');
+loadStatus();
+loadNotebooks();
+</script>
+</body>
+</html>

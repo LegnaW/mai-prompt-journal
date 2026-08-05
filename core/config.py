@@ -336,6 +336,37 @@ class AdvancedConfig(PluginConfigBase):
         },
     )
 
+
+class BackupConfig(PluginConfigBase):
+    """笔记本自动备份配置。"""
+
+    __ui_label__ = "备份"
+    __ui_icon__ = "archive"
+    __ui_order__ = 8
+
+    enabled: bool = Field(
+        default=True,
+        description="每次修改笔记本后自动创建备份",
+        json_schema_extra={
+            "label": "启用自动备份",
+            "hint": "每次笔记本被修改后按时间戳创建一份 jsonl 备份，可在『备份』页或 /mpj backup 指令查看/恢复/删除",
+            "order": 0,
+        },
+    )
+    max_per_notebook: int = Field(
+        default=6,
+        ge=1,
+        le=200,
+        description="每个笔记本保留的备份上限",
+        json_schema_extra={
+            "label": "备份上限",
+            "hint": "每个笔记本最多保留的备份份数，超出后自动删除最旧备份",
+            "order": 1,
+            "x-widget": "number",
+        },
+    )
+
+
 class PromptJournalConfig(PluginConfigBase):
     """麦麦的绘图笔记本配置。"""
 
@@ -347,3 +378,4 @@ class PromptJournalConfig(PluginConfigBase):
     dedup_merge: DedupMergeConfig = Field(default_factory=DedupMergeConfig)
     organize_db: OrganizeDbConfig = Field(default_factory=OrganizeDbConfig)
     advanced: AdvancedConfig = Field(default_factory=AdvancedConfig)
+    backup: BackupConfig = Field(default_factory=BackupConfig)
