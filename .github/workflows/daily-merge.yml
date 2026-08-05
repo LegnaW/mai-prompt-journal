@@ -2,7 +2,7 @@ name: daily-merge-dev-to-main
 
 on:
   schedule:
-    - cron: '30 2 * * *'   # 北京时间 10:30（UTC+8）
+    - cron: '30 23 * * *'   # 北京时间 07:30（UTC+8）；GitHub 实际调度约晚 3h，预期落在 10:30 左右
   workflow_dispatch:
 
 permissions:
