@@ -84,6 +84,7 @@ class WebUIMixin:
             app.router.add_get("/api/export/download", self._web_export_download)
             app.router.add_get("/api/transfer/state", self._web_transfer_state)
             app.router.add_post("/api/import/file", self._web_import_file)
+            app.router.add_post("/api/import/direct", self._web_import_direct)
             app.router.add_get("/api/import/file_preview", self._web_import_file_preview)
             app.router.add_post("/api/import/file_commit", self._web_import_file_commit)
 
@@ -1302,6 +1303,47 @@ class WebUIMixin:
         if self._tasks.get(task_id) is not None:
             self._tasks[task_id]["handle"] = handle
         return web.json_response({"task_id": task_id, "kind": "import", "state": "validating"})
+
+    async def _web_import_direct(self, request: Any) -> Any:
+        """直接导入（跳过校验流程）：rebuild=无视索引重建 / direct=跳过校验用自带索引。"""
+        from aiohttp import web
+
+        if not self._web_check_auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+
+        filename = ""
+        source = b""
+        mode = "rebuild"
+        target_name = ""
+        reader = await request.multipart()
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            if part.name == "file":
+                filename = part.filename or ""
+                source = await part.read()
+            elif part.name == "mode":
+                mode = (await part.read()).decode() or "rebuild"
+            elif part.name == "target_name":
+                target_name = (await part.read()).decode() or ""
+        if not source or not filename:
+            return web.json_response({"error": "未收到文件"}, status=400)
+        target_name = target_name.strip()
+        if not target_name:
+            return web.json_response({"error": "请输入新笔记本名称"}, status=400)
+
+        task_id = self._start_task("import_direct", "直接导入")
+        if task_id is None:
+            return web.json_response({"error": "已有后台任务进行中，请等待完成后再试"}, status=409)
+        self._reset_io()
+        self._set_io("import", "importing")
+        handle = asyncio.create_task(
+            self._run_direct_import_task(task_id, source, filename, mode, target_name)
+        )
+        if self._tasks.get(task_id) is not None:
+            self._tasks[task_id]["handle"] = handle
+        return web.json_response({"task_id": task_id, "kind": "import", "state": "importing"})
 
     async def _web_import_file_preview(self, request: Any) -> Any:
         """分页返回导入预览条目。"""

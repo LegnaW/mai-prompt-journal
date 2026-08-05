@@ -443,6 +443,70 @@ class ExportImportMixin:
         finally:
             self._evict_tasks()
 
+    async def _run_direct_import_task(
+        self, task_id: str, source: bytes, filename: str, mode: str, target_name: str
+    ) -> None:
+        """直接导入（跳过校验流程）：
+        mode=rebuild → 无视已有索引，用内置 embedding 重建索引导入；
+        mode=direct → 跳过索引校验，直接用文件自带索引（仅 mpj，需前端确认风险）。
+        """
+        try:
+            lower = filename.lower()
+            if mode == "rebuild":
+                entries = self._source_entries(source, lower)
+                if not entries:
+                    raise RuntimeError("没有可导入的条目")
+                ok, msg = await self._import_jsonl_entries(target_name, entries, "")
+            elif mode == "direct":
+                if not lower.endswith(".mpj"):
+                    raise RuntimeError("只有 mpj 才能使用自带索引直接导入（jsonl 无索引）")
+                unpacked = self._unpack_source(source)
+                if "error" in unpacked:
+                    raise RuntimeError(unpacked["error"])
+                entries, _ = self._parse_import_jsonl(unpacked["jsonl"].read_text(encoding="utf-8"))
+                if not entries:
+                    raise RuntimeError("没有可导入的条目")
+                ok, msg = await self._import_mpj_direct(target_name, entries, unpacked["npy"])
+            else:
+                raise RuntimeError("mode 只能是 rebuild 或 direct")
+
+            if ok:
+                self._set_io("import", "done")
+                self._write_io_result({"success": True, "message": msg, "notebook": target_name})
+                self._finish_task(task_id, {"ok": True, "message": msg})
+            else:
+                self._set_io("import", "error")
+                self._write_io_result({"error": msg})
+                self._fail_task(task_id, msg)
+        except Exception as exc:
+            self.ctx.logger.error(f"直接导入任务异常: {exc}", exc_info=True)
+            self._set_io("import", "error")
+            self._write_io_result({"error": f"导入失败：{exc}"})
+            self._fail_task(task_id, exc)
+        finally:
+            self._evict_tasks()
+
+    def _source_entries(self, source: bytes, filename: str) -> list[dict[str, Any]]:
+        """从上传文件（jsonl 或 mpj）解析出条目列表（不校验索引）。"""
+        if filename.endswith(".jsonl"):
+            entries, _ = self._parse_import_jsonl(source.decode("utf-8", errors="replace"))
+            return entries
+        if filename.endswith(".mpj"):
+            unpacked = self._unpack_source(source)
+            if "error" in unpacked:
+                return []
+            entries, _ = self._parse_import_jsonl(unpacked["jsonl"].read_text(encoding="utf-8"))
+            return entries
+        return []
+
+    def _unpack_source(self, source: bytes) -> dict[str, Any]:
+        """把上传的 mpj 解压到暂存目录，返回 unpack_mpj 结果。"""
+        unpack_dir = self._io_dir() / "unpack"
+        unpack_dir.mkdir(parents=True, exist_ok=True)
+        zip_path = unpack_dir / "upload.mpj"
+        zip_path.write_bytes(source)
+        return unpack_mpj(zip_path, unpack_dir)
+
     async def _import_jsonl_entries(
         self, target_name: str, entries: list[dict[str, Any]], merge_target: str
     ) -> tuple[bool, str]:
