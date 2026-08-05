@@ -377,13 +377,21 @@ function importFileSelected() {
 
 function handleImportDrop(event) {
   event.preventDefault();
-  this.style.background = '#f5f9ff';
+  event.stopPropagation();
+  const zone = document.getElementById('importDropZone');
+  if (zone) zone.style.background = '#f5f9ff';
   const dt = event.dataTransfer;
   const file = dt && dt.files && dt.files[0];
   if (!file) return;
   if (!/\.(jsonl|mpj)$/i.test(file.name)) { alert('仅支持 .jsonl 或 .mpj 文件'); return; }
   const fileEl = document.getElementById('importFile');
-  fileEl.files = dt.files;
+  try {
+    fileEl.files = dt.files;
+  } catch (e) {
+    const dt2 = new DataTransfer();
+    dt2.items.add(file);
+    fileEl.files = dt2.files;
+  }
   document.getElementById('importDropFileName').textContent = '已选择：' + file.name;
   defaultImportName = String(file.name).replace(/\.(jsonl|mpj)$/i, '');
 }
