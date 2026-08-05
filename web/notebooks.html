@@ -35,42 +35,49 @@
       支持 jsonl（仅笔记数据）与 mpj（zip：笔记 + 索引 + 校验码，不含缓存）两种格式。上传 mpj 会校验完整性并抽样检查索引；校验 / 导入均为后台任务，页面刷新不丢进度。
     </div>
 
-    <div class="row" style="margin-bottom:6px;gap:8px;flex-wrap:wrap;">
-      <label>下载:</label>
+    <div class="row" style="margin-bottom:6px;gap:8px;flex-wrap:wrap;align-items:center;">
+      <strong>下载</strong>
+      <label>笔记本</label>
       <select id="exportNotebook" class="notebook-select" onchange="onExportChange()"><option value="default">default</option></select>
+      <label>格式</label>
       <select id="exportFormat" onchange="onExportChange()">
         <option value="jsonl">jsonl</option>
         <option value="mpj">mpj（zip）</option>
       </select>
-      <input type="text" id="exportFilename" placeholder="文件名" style="flex:1;min-width:120px;">
+      <label>文件名</label>
+      <input type="text" id="exportFilename" style="flex:1;min-width:140px;">
       <button class="btn" onclick="doExport()">下载</button>
     </div>
 
-    <div class="row hidden" id="exportModeRow" style="margin-bottom:6px;gap:8px;flex-wrap:wrap;">
-      <label>mpj 导出方式:</label>
+    <div class="row hidden" id="exportModeRow" style="margin-bottom:6px;gap:8px;flex-wrap:wrap;align-items:center;">
+      <label>mpj 导出方式</label>
       <select id="exportMode" onchange="onExportModeChange()">
         <option value="direct">直接导出（使用当前索引）</option>
         <option value="rebuild">用第三方 embedding 重新生成索引导出</option>
       </select>
     </div>
 
-    <div class="hidden" id="embeddingConfigRow" style="margin-top:8px;padding:10px;background:#f8f9fa;border-radius:8px;">
-      <div style="font-size:12px;color:#333;margin-bottom:6px;">第三方 embedding 配置（保存到服务器，下次自动预填）</div>
-      <div class="row" style="gap:6px;flex-wrap:wrap;">
-        <input type="text" id="embBaseUrl" placeholder="API 地址，如 https://api.example.com/v1" style="flex:2;min-width:180px;">
-        <input type="text" id="embApiKey" placeholder="API 密钥" style="flex:1;min-width:120px;">
-        <input type="text" id="embModel" placeholder="模型名" style="flex:1;min-width:120px;">
-        <input type="number" id="embTimeout" placeholder="超时(秒)" value="60" style="width:90px;">
-        <button class="btn btn-outline btn-sm" onclick="saveEmbeddingProfile()">保存配置</button>
+    <div class="hidden" id="embeddingConfigRow" style="margin-top:8px;padding:12px;background:#f8f9fa;border-radius:8px;">
+      <div style="font-size:12px;color:#333;margin-bottom:8px;">第三方 embedding 配置（用于重新生成索引导出；保存到服务器，下次自动预填）</div>
+      <div style="display:grid;grid-template-columns:auto 1fr;gap:6px 12px;align-items:center;font-size:13px;color:#333;">
+        <label for="embBaseUrl">API 地址</label>
+        <input type="text" id="embBaseUrl" placeholder="如 https://api.example.com/v1">
+        <label for="embApiKey">API 密钥</label>
+        <input type="text" id="embApiKey" placeholder="sk-...">
+        <label for="embModel">模型名</label>
+        <input type="text" id="embModel" placeholder="如 text-embedding-3-small">
+        <label for="embTimeout">超时（秒）</label>
+        <input type="number" id="embTimeout" value="60" min="5" max="600">
       </div>
+      <div style="margin-top:10px;"><button class="btn btn-outline btn-sm" onclick="saveEmbeddingProfile()">保存配置</button></div>
     </div>
 
     <div style="border-top:1px solid #eee;margin:12px 0;"></div>
 
-    <div class="row" style="gap:8px;flex-wrap:wrap;margin-bottom:6px;">
-      <label>上传:</label>
+    <div class="row" style="gap:8px;flex-wrap:wrap;margin-bottom:6px;align-items:center;">
+      <strong>上传</strong>
       <input type="file" id="importFile" accept=".jsonl,.mpj" style="flex:2;min-width:200px;">
-      <label>抽样条数:</label>
+      <label>抽样条数</label>
       <input type="number" id="importSample" value="25" min="1" max="200" style="width:80px;">
       <button class="btn btn-success" onclick="uploadFile()">上传并校验</button>
     </div>
