@@ -27,12 +27,13 @@ from maibot_sdk.types import ToolParameterInfo, ToolParamType
 from .core.backup_mixin import BackupMixin
 from .core.config import PromptJournalConfig
 from .core.constants import _WRITE_TOOL_NAMES
+from .core.export_import_mixin import ExportImportMixin
 from .core.notebook import Notebook, scramble_id
 from .core.organize_mixin import OrganizeMixin
 from .core.search_mixin import SearchMixin
 from .core.webui_mixin import WebUIMixin
 
-class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin, BackupMixin):
+class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin, BackupMixin, ExportImportMixin):
     """麦麦的绘图笔记本插件。"""
 
     config_model = PromptJournalConfig

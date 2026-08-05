@@ -38,6 +38,9 @@
 | `core/organize_mixin.py` | `OrganizeMixin`：LLM 直连、去重整理、操作数据库、批量导入的 agent 循环 |
 | `core/json_utils.py` | 宽容 JSON 解析（`parse_lenient_json`：多候选提取 + strict=False/去尾逗号/非法转义/单引号修复） |
 | `core/backup_mixin.py` | `BackupMixin`：笔记本自动备份（创建/列表/恢复/删除/上限淘汰，`data_dir/backups/{name}/{时间戳}.jsonl`） |
+| `core/export_import_mixin.py` | `ExportImportMixin`：笔记本导出（jsonl/mpj）/ 文件导入（后台校验 + 提交 + 抗刷新暂存 `data_dir/file_import/`） |
+| `core/embedding_client.py` | 第三方 OpenAI 兼容 embedding 客户端 + 配置存取（`data_dir/embedding_profile.json`） |
+| `core/mpj.py` | mpj 打包/解包 + `checksum.sha256` 校验码 |
 | `core/webui_mixin.py` | `WebUIMixin`：WebUI 服务器 + 全部 API + 后台任务中心 + 去重扫描 |
 | `web/index.html` | WebUI 首页（状态栏 + 搜索/浏览 + 添加） |
 | `web/dedup.html` | WebUI 去重页 |
@@ -49,7 +52,7 @@
 | `web/style.css` | WebUI 共享样式 |
 | `config.toml` | 运行时配置 |
 
-**架构说明**：主类 `PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin, BackupMixin)` 通过 mixin 拆分业务，SDK 用 `dir(instance)` 收集组件，继承方法可正常注册。加载器以 `plugin.py` 为入口（`submodule_search_locations`），`core/` 下用**相对导入**（`from .core.config import ...`，与 maimai-drawpic-plugin 同款）。新增逻辑时：配置字段加在 `core/config.py`，通用工具/存储放 `core/notebook.py` 或新增 `core/*.py`，WebUI 处理器加进 `WebUIMixin`，agent 循环加进 `OrganizeMixin`，搜索相关加进 `SearchMixin`，备份相关加进 `BackupMixin`。
+**架构说明**：主类 `PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin, BackupMixin, ExportImportMixin)` 通过 mixin 拆分业务，SDK 用 `dir(instance)` 收集组件，继承方法可正常注册。加载器以 `plugin.py` 为入口（`submodule_search_locations`），`core/` 下用**相对导入**（`from .core.config import ...`，与 maimai-drawpic-plugin 同款）。新增逻辑时：配置字段加在 `core/config.py`，通用工具/存储放 `core/notebook.py` 或新增 `core/*.py`，WebUI 处理器加进 `WebUIMixin`，agent 循环加进 `OrganizeMixin`，搜索相关加进 `SearchMixin`，备份相关加进 `BackupMixin`，导入导出相关加进 `ExportImportMixin`。
 
 WebUI 为多页面静态站点（无构建步骤）：`/` 返回 `web/index.html`，`/web/` 目录由 `_run_web_server` 中 `app.router.add_static("/web/", web_dir)` 提供服务。新增功能页 = 新建 `web/*.html` + 在 `app.js` 的 `NAV_ITEMS` 加导航项，并在页面底部调用 `injectNav('<id>')` + `loadStatus()`。
 
@@ -210,6 +213,28 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 - **处置**（`POST /api/import/resolve`）：`merge` 合并入已有笔记本（复用 tmp 向量直接追加）、`create` 新建笔记本（复制 tmp 四文件到 `imports/{new_name}.jsonl`，`_discover_notebooks` 自动发现）、`discard` 丢弃（仅清空状态，文件留给下一轮清理）。
 - **API**：`POST /api/import/preview`（切分预览）/ `POST /api/import/start` / `GET /api/import/status` / `GET /api/import/tmp_notes` / `GET /api/import/log` / `POST /api/import/resolve`。
 - 导入走通用任务中心 `_start_task("import", ...)`，与 rebuild 互斥（进行中拒绝新任务，409）；进度在导入页 + 顶部任务栏同步显示。
+
+## 笔记本上传 / 下载（`web/notebooks.html` 区块）
+
+### 导出（下载）
+- `jsonl`：仅 `{name}.jsonl`。
+- `mpj`（zip）：`{name}.jsonl` + `.embeddings.npy` + `.index.meta` + `checksum.sha256`（**不含 cache**）。
+  - `mode=direct`：打包当前索引；`mode=rebuild`：用**第三方 embedding**（`data_dir/embedding_profile.json`，WebUI 可保存复用）对所有条目重新生成索引后打包。
+- `GET /api/export?notebook=&format=&mode=&filename=` 返回附件。
+
+### 导入（后台任务 + 抗刷新）
+- `POST /api/import/file`（multipart：`file` + `sample` 抽样数）→ 重置 `data_dir/file_import/` → `state=validating` → 起后台校验任务。
+- 校验：jsonl 解析（`_parse_import_jsonl`：缺 id 补 `scramble_id`、缺 ts 补当前时间、坏行计入 skipped）；mpj 解包 → 校验码 → 维度（内置 embedding 探针）→ 条目数=向量数 → 维度一致时抽样（默认 25，前端可指定）用内置 embedding 重算余弦 → 平均/最小相似度。结果写 `preview.jsonl` + `preview.json`，`state=ready`。
+- **校验码**：`checksum.sha256` 缺失或对不上都视为"可能被第三方修改"，前端显示警告并要求勾选"我已了解风险"才能提交（同一警告文案）。
+- `GET /api/import/file_state`（抗刷新）/ `GET /api/import/file_preview?page=&size=`（分页展示全部条目）/ `POST /api/import/file_commit`。
+- 提交：jsonl / mpj-rebuild → 内置 embedding 全量建索引 → **新建或合并**（合并时重生成 id 防冲突，前端提醒去重）；mpj-direct → 保留 mpj 自带索引（仅新建，需维度一致 + 条目数=向量数）。
+- 状态机持久化在 `data_dir/file_import/state`（none/validating/ready/importing/done/error），刷新不丢。
+- `client_max_size` 已放宽到 256MB（支持大 mpj）。
+
+### 关键约束
+- 新增导出/导入逻辑放 `ExportImportMixin`；mpj 打包校验在 `core/mpj.py`；第三方 embedding 在 `core/embedding_client.py`。
+- **校验码不是加密签名**：能发现内容被改动，但防不住懂行的人重算校验码重打包。
+- 导入会修改/新建笔记本：新建不触发备份，**合并会触发备份**（`_import_jsonl_entries` 里已调 `_create_backup`）。
 
 ## 配置节布局与版本迁移（v2.3.1）
 
