@@ -25,6 +25,22 @@
 - WebUI 去重功能：语义扫描 → LLM 整理（可配置任务名与系统提示词）
 - 1 个 WebUI 首页 HomeCard
 
+## 近期更新（dev 分支，未发布）
+
+- **WebUI 活跃任务栏收起**：`injectTaskCenter` 头部新增收起/展开按钮（`toggleTaskCenter`，`web/app.js`），任务列表可折叠；`.hidden` 需 `!important` 故不受影响。
+- **导出默认格式改为 mpj**：`exportFormat` 下拉默认选中 mpj，页面加载后文件名自动填 `default.mpj`。
+- **第三方 embedding 配置新增「向量维度」**：`embedding_profile.json` 新增可选 `dim` 字段（WebUI 表单 `embDim` 输入并自动预填）；后端 `_web_embedding_profile_save` 支持存取；`_export_mpj_rebuild` 导出时若配置了 `dim` 会逐条核对第三方返回的向量维度，不符即报错中止，防止导出损坏的 mpj（`core/export_import_mixin.py`）。
+- **导出前自动保存第三方配置**：`doExport` 在 mpj + rebuild 模式点击「开始导出」时先静默保存当前表单配置（`saveEmbeddingProfile(true)`）再启动导出，避免用旧配置导出；direct 模式不依赖该配置不触发。
+- **api_key 保留语义**：placeholder 标注「留空则保留已保存的密钥」；GET 端点不回传 api_key、前端表单恒为空，后端仅当提交值非空时才覆盖 `profile["api_key"]`。
+- **导入校验相似度警告**：抽样最小相似度 < 0.95 时，`renderImportPreview` 将数值红色加粗并追加红底提示「向量与内容可能存在不一致」，提醒导入前核对（阈值 0.95 仅前端）。
+- **导入/导出列位置交换**：「导入 / 导出」选项卡现为**左导出、右导入**（此前左导入右导出）。
+- **导出说明文案更新**：明确 jsonl 仅为数据记录（无索引、重导需重算）、mpj 为本插件专用格式（打包索引，同 embedding 模型可直接导入），以及两种导出模式的用途。
+- **直接导入按钮仅 mpj 显示**：jsonl 预览不再显示「直接导入」按钮（此前空按钮出现在 jsonl 预览中）。
+- **输入框样式统一**：`input[type="number"]` 补入通用输入框样式与 focus 高亮（此前数字输入框无边框/内边距，`web/style.css`）。
+- **txt 批量导入取消/状态按任务类型过滤**：`_cancel_running_task(task_type)` 支持按类型取消；txt 导入页的取消与「笔记本构建中」状态只认 `type=="import"` 任务，避免误杀重建/导出等无关任务（`core/webui_mixin.py`）。
+- **拖拽上传兼容 Firefox/Safari**：`web/import.html` 的 drop 处理器在 `input.files` 只读时经 `DataTransfer` 中转赋值。
+- **.gitignore 忽略 `test_files/`**（本地测试用 mpj 样本不入库）。
+
 ## 核心文件
 
 | 文件 | 职责 |
@@ -219,12 +235,14 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 > 导入与导出共用一套**统一传输状态机**（持久化在 `data_dir/file_io/`，页面刷新不丢）：
 > `kind` = import | export；`state` = none / validating / ready / importing / building / done / error。
 > 由于后台任务走 `_start_task`（占用即拒绝新任务），同一时刻只会有一个导入或导出任务，一个状态槽即可。
-> 前端 `web/notebooks.html` 在「导入 / 导出」选项卡下用**一个统一状态元素**渲染（左侧导入、右侧导出两列，移动端上下堆叠）。
+> 前端 `web/notebooks.html` 在「导入 / 导出」选项卡下用**一个统一状态元素**渲染（左侧导出、右侧导入两列，移动端上下堆叠）。
 
 ### 导出（一律后台任务，产物写入 `file_io/artifact/`）
+- 前端 `exportFormat` **默认 mpj**（jsonl 需手动切换）。
 - `POST /api/export/start` `{notebook, format, mode, filename}` → `kind=export, state=building` → 后台任务。
-- jsonl：直接复制源文件重命名到 `artifact/`；mpj（`mode=direct` 打包当前索引 / `mode=rebuild` 用第三方 embedding 重新生成索引后打包，含校验码）写入 `artifact/`。
-- `mode=rebuild`：第三方配置 `data_dir/embedding_profile.json`（base_url/api_key/model/timeout/**concurrent**，WebUI 表单可保存复用）；embed 为**信号量并发逐条**（`Semaphore(profile.concurrent)`，默认 4）+ 逐条写进度。
+- jsonl：仅为数据记录、无索引，直接复制源文件重命名到 `artifact/`（重新导入需重算索引）；mpj 为本插件专用格式，除数据外打包索引（`mode=direct` 打包当前索引 / `mode=rebuild` 用第三方 embedding 重新生成索引后打包，含校验码）写入 `artifact/`。
+- `mode=rebuild`：第三方配置 `data_dir/embedding_profile.json`（base_url/api_key/model/timeout/**concurrent**/**dim**，WebUI 表单可保存复用；api_key 留空沿用已保存值）；embed 为**信号量并发逐条**（`Semaphore(profile.concurrent)`，默认 4）+ 逐条写进度；**若配置了 `dim`，导出时逐条核对第三方返回的向量维度**，不符即报错中止。
+- **导出前自动保存配置**：前端 `doExport` 在 mpj+rebuild 模式先静默保存当前表单配置（`saveEmbeddingProfile(true)`）再启动导出，避免用旧配置导出（direct 模式不触发）。
 - 完成 → `state=done`，`result.json` 存 `{filename, size, ctype}`；`GET /api/export/download` 下载产物。
 
 ### 导入（后台任务 + 抗刷新）
@@ -232,14 +250,15 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 - `POST /api/import/file`（multipart：`file` + `sample` 抽样数）→ `_reset_io()` → `kind=import, state=validating` → 起后台校验任务。
 - 校验：jsonl 解析（`_parse_import_jsonl`：缺 id 补 `scramble_id`、缺 ts 补当前时间、坏行计入 skipped）；mpj 解包 → 校验码 → 维度（内置 embedding 探针）→ 条目数=向量数 → 维度一致时抽样（默认 25，前端可指定；**填 0 表示不校验相似度**，`meta.sample.skipped=true`，预览显示"未校验"）用内置 embedding 重算余弦 → 平均/最小相似度。结果写 `preview.jsonl` + `preview.json`，`state=ready`。
 - **校验码**：`checksum.sha256` 缺失或对不上都视为"可能被第三方修改"，前端显示警告并要求勾选"我已了解风险"才能提交（同一警告文案）。
-- 预览：新笔记本名称**默认取上传文件名**（去扩展名，输入框在预览面板）；目标（新建/合并）+ 三个按钮 **直接导入 / 重建索引导入 / 清除**（直接导入仅 mpj 且维度/数量一致时可用；校验码异常需勾选"我已了解风险"才可点导入）。
+- **抽样相似度警告**：`renderImportPreview` 中抽样**最小相似度 < 0.95** 时数值红色加粗，并追加红底提示「向量与内容可能存在不一致」（可能被第三方修改或所用模型不同），提醒导入前核对（阈值仅前端）。
+- 预览：新笔记本名称**默认取上传文件名**（去扩展名，输入框在预览面板）；目标（新建/合并）+ 按钮 **直接导入（仅 mpj 且维度/数量一致时显示）/ 重建索引导入 / 清除**（校验码异常需勾选"我已了解风险"才可点导入）。
 - 提交：jsonl / mpj-rebuild → 内置 embedding 全量建索引 → **新建或合并**（合并时重生成 id 防冲突，前端提醒去重）；mpj-direct → 保留 mpj 自带索引（仅新建，需维度一致 + 条目数=向量数）。
 - **进度与取消**：`file_io/progress.json` 由 `_write_io_progress` 写入（phase/done/total；导入用 `_embed_with_progress` 信号量并发逐条 embed，并发取 `config.journal.embed_max_concurrent`；mpj 校验抽样逐条）；前端状态元素显示 `(xx/xx)` + **取消按钮**（`POST /api/transfer/cancel` → `_cancel_running_task()` + `_reset_io()`）。
 - 端点：`GET /api/transfer/state`（统一状态+进度，抗刷新）/ `POST /api/transfer/clear` / `POST /api/transfer/cancel` / `GET /api/import/file_preview?page=&size=` / `POST /api/import/file_commit`。
 - `client_max_size` 已放宽到 256MB（支持大 mpj）。
 
 ### 关键约束
-- 新增导出/导入逻辑放 `ExportImportMixin`；mpj 打包校验在 `core/mpj.py`；第三方 embedding 在 `core/embedding_client.py`（`EmbeddingClient.embed` 直连 OpenAI 兼容 `/embeddings`，profile 含 `concurrent`）。
+- 新增导出/导入逻辑放 `ExportImportMixin`；mpj 打包校验在 `core/mpj.py`；第三方 embedding 在 `core/embedding_client.py`（`EmbeddingClient.embed` 直连 OpenAI 兼容 `/embeddings`，profile 含 `concurrent` 与可选 `dim`）。
 - **校验码不是加密签名**：能发现内容被改动，但防不住懂行的人重算校验码重打包。
 - 导入会修改/新建笔记本：新建不触发备份，**合并会触发备份**（`_import_jsonl_entries` 里已调 `_create_backup`）。
 - 备份功能已并入 `web/notebooks.html`「笔记本管理」选项卡（独立 `web/backups.html` 已删除，`/api/backups/*` 接口保留）。

@@ -45,37 +45,17 @@
     <div id="tabTransfer" class="hidden">
       <div class="two-col">
         <div class="col">
-          <strong>导入</strong>
-          <div style="font-size:12px;color:#999;margin:4px 0 8px;line-height:1.6;">
-            上传 jsonl 或 mpj 文件；mpj 会校验完整性（校验码 / 向量维度 / 抽样相似度），可新建或合并到已有笔记本。
-          </div>
-          <div id="importDropZone" style="border:2px dashed #4f9afe;border-radius:10px;padding:24px 16px;text-align:center;cursor:pointer;background:#f5f9ff;transition:background 0.2s;margin-bottom:8px;"
-            onclick="document.getElementById('importFile').click()"
-            ondragover="event.preventDefault();this.style.background='#e3efff';"
-            ondragleave="this.style.background='#f5f9ff';"
-            ondrop="handleImportDrop(event)">
-            <div style="font-size:14px;color:#3a8bef;">点击选择 或 拖拽 jsonl / mpj 文件到此处</div>
-            <div id="importDropFileName" style="font-size:12px;color:#888;margin-top:6px;">支持 .jsonl 与 .mpj</div>
-            <input type="file" id="importFile" accept=".jsonl,.mpj" style="display:none;" onchange="importFileSelected()">
-          </div>
-          <div class="row" style="gap:8px;flex-wrap:wrap;">
-            <label>抽样条数</label>
-            <input type="number" id="importSample" value="25" min="0" max="200" style="width:80px;">
-            <span style="font-size:12px;color:#999;">填 0 表示不校验相似度</span>
-            <button class="btn btn-success" onclick="uploadFile()">上传并校验</button>
-          </div>
-        </div>
-
-        <div class="col">
           <strong>导出</strong>
           <div style="font-size:12px;color:#999;margin:4px 0 8px;line-height:1.6;">
-            支持 jsonl 与 mpj（含索引 + 校验码）；mpj 可"直接导出"或"用第三方 embedding 重新生成索引导出"。导出完成后在下方状态区下载。
+            jsonl 仅为数据记录，无向量索引，重新导入需花费时间重新计算索引。<br>
+            mpj 为本插件专用文件，除数据记录外还会打包索引，若导入者使用相同 embedding 模型则可直接使用无需重构索引。<br>
+            mpj 可"直接导出"或"用第三方 embedding 重新生成索引导出"，以便适配其他 embedding。导出完成后在下方状态区下载。
           </div>
           <div class="row" style="margin-bottom:6px;gap:8px;flex-wrap:wrap;">
             <select id="exportNotebook" class="notebook-select" onchange="onExportChange()"><option value="default">default</option></select>
             <select id="exportFormat" onchange="onExportChange()">
-              <option value="jsonl">jsonl</option>
               <option value="mpj">mpj</option>
+              <option value="jsonl">jsonl</option>
             </select>
           </div>
           <div class="row hidden" id="exportModeRow" style="margin-bottom:6px;gap:8px;flex-wrap:wrap;">
@@ -95,15 +75,39 @@
               <label for="embBaseUrl">API 地址</label>
               <input type="text" id="embBaseUrl" placeholder="如 https://api.example.com/v1">
               <label for="embApiKey">API 密钥</label>
-              <input type="text" id="embApiKey" placeholder="sk-...">
+              <input type="text" id="embApiKey" placeholder="sk-...（留空则保留已保存的密钥）">
               <label for="embModel">模型名</label>
               <input type="text" id="embModel" placeholder="如 text-embedding-3-small">
               <label for="embTimeout">超时（秒）</label>
               <input type="number" id="embTimeout" value="60" min="5" max="600">
               <label for="embConcurrent">embedding 并发数</label>
               <input type="number" id="embConcurrent" value="4" min="1" max="16">
+              <label for="embDim">向量维度</label>
+              <input type="number" id="embDim" placeholder="如 1024（留空不校验，导出前按此值核对返回维度）" min="0">
             </div>
             <div style="margin-top:10px;"><button class="btn btn-outline btn-sm" onclick="saveEmbeddingProfile()">保存配置</button></div>
+          </div>
+        </div>
+
+        <div class="col">
+          <strong>导入</strong>
+          <div style="font-size:12px;color:#999;margin:4px 0 8px;line-height:1.6;">
+            上传 jsonl 或 mpj 文件；mpj 会校验完整性（校验码 / 向量维度 / 抽样相似度），可新建或合并到已有笔记本。
+          </div>
+          <div id="importDropZone" style="border:2px dashed #4f9afe;border-radius:10px;padding:24px 16px;text-align:center;cursor:pointer;background:#f5f9ff;transition:background 0.2s;margin-bottom:8px;"
+            onclick="document.getElementById('importFile').click()"
+            ondragover="event.preventDefault();this.style.background='#e3efff';"
+            ondragleave="this.style.background='#f5f9ff';"
+            ondrop="handleImportDrop(event)">
+            <div style="font-size:14px;color:#3a8bef;">点击选择 或 拖拽 jsonl / mpj 文件到此处</div>
+            <div id="importDropFileName" style="font-size:12px;color:#888;margin-top:6px;">支持 .jsonl 与 .mpj</div>
+            <input type="file" id="importFile" accept=".jsonl,.mpj" style="display:none;" onchange="importFileSelected()">
+          </div>
+          <div class="row" style="gap:8px;flex-wrap:wrap;">
+            <label>抽样条数</label>
+            <input type="number" id="importSample" value="25" min="0" max="200" style="width:80px;">
+            <span style="font-size:12px;color:#999;">填 0 表示不校验相似度</span>
+            <button class="btn btn-success" onclick="uploadFile()">上传并校验</button>
           </div>
         </div>
       </div>
@@ -279,36 +283,57 @@ function loadEmbeddingProfile() {
     if (p.model) document.getElementById('embModel').value = p.model;
     if (p.timeout) document.getElementById('embTimeout').value = p.timeout;
     if (p.concurrent) document.getElementById('embConcurrent').value = p.concurrent;
+    if (p.dim) document.getElementById('embDim').value = p.dim;
   }).catch(() => {});
 }
 
-function saveEmbeddingProfile() {
-  const body = {
+function collectEmbeddingProfile() {
+  return {
     base_url: document.getElementById('embBaseUrl').value.trim(),
     api_key: document.getElementById('embApiKey').value.trim(),
     model: document.getElementById('embModel').value.trim(),
     timeout: parseInt(document.getElementById('embTimeout').value || '60', 10),
     concurrent: parseInt(document.getElementById('embConcurrent').value || '4', 10),
+    dim: parseInt(document.getElementById('embDim').value || '0', 10) || 0,
   };
-  api('POST', '/api/embedding_profile', body).then(data => {
-    if (data.error) { alert(data.error); return; }
-    alert('已保存第三方 embedding 配置');
-    document.getElementById('embApiKey').value = '';
-  }).catch(() => {});
+}
+
+function saveEmbeddingProfile(silent) {
+  return api('POST', '/api/embedding_profile', collectEmbeddingProfile()).then(data => {
+    if (data.error) { throw new Error(data.error); }
+    if (!silent) {
+      alert('已保存第三方 embedding 配置');
+      document.getElementById('embApiKey').value = '';
+    }
+    return data;
+  }).catch(err => {
+    if (!silent) alert(err.message || '保存配置失败');
+    throw err;
+  });
 }
 
 function doExport() {
-  const body = {
-    notebook: document.getElementById('exportNotebook').value,
-    format: document.getElementById('exportFormat').value,
-    mode: document.getElementById('exportFormat').value === 'mpj' ? document.getElementById('exportMode').value : 'direct',
-    filename: document.getElementById('exportFilename').value.trim(),
+  const fmt = document.getElementById('exportFormat').value;
+  const mode = document.getElementById('exportFormat').value === 'mpj' ? document.getElementById('exportMode').value : 'direct';
+  const startExport = () => {
+    const body = {
+      notebook: document.getElementById('exportNotebook').value,
+      format: fmt,
+      mode: mode,
+      filename: document.getElementById('exportFilename').value.trim(),
+    };
+    api('POST', '/api/export/start', body).then(data => {
+      if (data.error) { alert(data.error); return; }
+      showTransferBody();
+      startTransferPolling();
+    }).catch(() => {});
   };
-  api('POST', '/api/export/start', body).then(data => {
-    if (data.error) { alert(data.error); return; }
-    showTransferBody();
-    startTransferPolling();
-  }).catch(() => {});
+  if (fmt === 'mpj' && mode === 'rebuild') {
+    // 导出前先保存当前第三方 embedding 配置，避免用旧配置导出
+    saveEmbeddingProfile(true).then(startExport).catch(() => {});
+  } else {
+    startExport();
+  }
 }
 
 // ============ 统一传输状态机 ============
@@ -449,7 +474,14 @@ function renderImportPreview(meta) {
     html += `<p><strong>向量维度：</strong>${meta.dim}　<strong>与内置 embedding 一致：</strong>${dimOk ? '是' : '否'}</p>`;
     html += `<p><strong>条目数 = 向量数：</strong>${countOk ? '是' : '否'}</p>`;
     if (meta.sample && meta.sample.n > 0) {
-      html += `<p><strong>抽样相似度（n=${meta.sample.n}）：</strong>平均 ${meta.sample.avg}　最小 ${meta.sample.min}</p>`;
+      const lowSim = meta.sample.min < 0.95;
+      html += `<p><strong>抽样相似度（n=${meta.sample.n}）：</strong>` +
+        `<span${lowSim ? ' style="color:#c62828;font-weight:bold;"' : ''}>平均 ${meta.sample.avg}　最小 ${meta.sample.min}</span></p>`;
+      if (lowSim) {
+        html += `<div style="margin:6px 0;padding:8px 10px;background:#fdecea;border:1px solid #f5c6c6;border-radius:8px;font-size:13px;color:#b71c1c;line-height:1.7;">
+          抽样相似度最低值低于 0.95，mpj 中的向量与笔记内容可能存在不一致（可能被第三方修改，或生成向量所用模型不同），导入前请务必核对。
+        </div>`;
+      }
     } else {
       html += `<p><strong>抽样相似度：</strong><span style="color:#999">未校验</span>${(meta.sample && meta.sample.skipped) ? '（抽样条数填 0）' : ''}</p>`;
     }
@@ -479,8 +511,8 @@ function renderImportPreview(meta) {
   <div id="mergeHint" class="hidden" style="font-size:12px;color:#c62828;margin-bottom:6px;">合并后建议到「去重」页扫描一次去重检测。</div>`;
 
   html += `<div class="row" style="margin:10px 0;gap:8px;flex-wrap:wrap;">
-    <button class="btn btn-success" id="directBtn" data-can-direct="${isMpj && dimOk && countOk ? '1' : '0'}"
-      onclick="doCommit('direct')" title="${isMpj && dimOk && countOk ? '使用 mpj 自带索引直接导入' : '仅 mpj 且维度/数量一致才可直接导入'}">直接导入</button>
+    ${isMpj ? `<button class="btn btn-success" id="directBtn" data-can-direct="${dimOk && countOk ? '1' : '0'}"
+      onclick="doCommit('direct')" title="${dimOk && countOk ? '使用 mpj 自带索引直接导入' : '仅 mpj 且维度/数量一致才可直接导入'}">直接导入</button>` : ''}
     <button class="btn" id="rebuildBtn" onclick="doCommit('rebuild')">重建索引导入</button>
     <button class="btn btn-outline" onclick="clearTransfer()">清除</button>
   </div>

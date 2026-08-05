@@ -780,11 +780,17 @@ class WebUIMixin:
         }
         return task_id
 
-    def _cancel_running_task(self) -> bool:
-        """取消当前进行中的后台任务（import/rebuild），返回是否取消成功。"""
+    def _cancel_running_task(self, task_type: str | None = None) -> bool:
+        """取消当前进行中的后台任务，可按 task_type 过滤；返回是否取消成功。
+
+        task_type 为 None 时取消任意正在运行的任务（保留旧语义，供传输状态机使用）；
+        指定时只取消匹配类型的任务，避免 txt 导入页误取消重建/导出等无关任务。
+        """
         cancelled = False
         for tid, task in list(self._tasks.items()):
             if task.get("status") == "running":
+                if task_type is not None and task.get("type") != task_type:
+                    continue
                 handle = task.get("handle")
                 if handle is not None and not handle.done():
                     handle.cancel()
@@ -1011,7 +1017,7 @@ class WebUIMixin:
 
         if not self._web_check_auth(request):
             return web.json_response({"error": "unauthorized"}, status=401)
-        cancelled = self._cancel_running_task()
+        cancelled = self._cancel_running_task("import")
         async with self._lock:
             self._reset_tmp_import()
         return web.json_response({"success": True, "cancelled": cancelled})
@@ -1023,8 +1029,9 @@ class WebUIMixin:
         if not self._web_check_auth(request):
             return web.json_response({"error": "unauthorized"}, status=401)
 
-        # 构建中：有 running 的 import 任务
-        running = [t for t in self._tasks.values() if t.get("status") == "running"]
+        # 构建中：仅认 txt 批量导入任务（type=="import"），避免把重建/导出等
+        # 其他任务误报为"笔记本构建中"并让"取消导入"误杀它们
+        running = [t for t in self._tasks.values() if t.get("status") == "running" and t.get("type") == "import"]
         if running:
             t = running[0]
             progress = dict(t.get("progress", {}))
@@ -1204,6 +1211,13 @@ class WebUIMixin:
             profile["concurrent"] = max(1, min(16, concurrent))
         except (TypeError, ValueError):
             pass
+        dim = body.get("dim")
+        if dim is not None:
+            try:
+                dim = int(dim) or 0
+            except (TypeError, ValueError):
+                dim = 0
+            profile["dim"] = max(0, dim)
         if not profile.get("base_url") or not profile.get("api_key") or not profile.get("model"):
             return web.json_response({"error": "base_url / api_key / model 均不能为空"}, status=400)
         save_embedding_profile(self._data_dir, profile)

@@ -20,6 +20,7 @@ __pycache__/
 venv/
 
 # 测试 / 缓存
+test_files/
 .pytest_cache/
 .ruff_cache/
 .coverage

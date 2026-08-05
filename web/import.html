@@ -154,7 +154,14 @@ function handleImportDrop(event) {
   if (!file) return;
   if (!/\.txt$/i.test(file.name)) { alert('仅支持 .txt 文本文件'); return; }
   const fileEl = document.getElementById('importFile');
-  fileEl.files = dt.files;
+  try {
+    fileEl.files = dt.files;
+  } catch (e) {
+    // Firefox/Safari 中 input.files 为只读，需经 DataTransfer 中转
+    const dt2 = new DataTransfer();
+    dt2.items.add(file);
+    fileEl.files = dt2.files;
+  }
   document.getElementById('importDropFileName').textContent = '已选择：' + file.name;
   doPreviewImport();
 }

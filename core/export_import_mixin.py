@@ -325,6 +325,15 @@ class ExportImportMixin:
         if any(v is None for v in vectors):
             raise RuntimeError("第三方 embedding 调用失败，请检查配置或网络")
 
+        expected_dim = int(profile.get("dim", 0) or 0)
+        if expected_dim > 0:
+            for i, v in enumerate(vectors):
+                if len(v) != expected_dim:
+                    raise RuntimeError(
+                        f"第三方 embedding 返回维度 {len(v)} 与配置的向量维度 {expected_dim} 不一致"
+                        f"（第 {i + 1} 条），请检查模型配置"
+                    )
+
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
             jsonl_path = tmp / f"{nb.name}.jsonl"

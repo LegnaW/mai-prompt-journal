@@ -232,6 +232,7 @@ function injectTaskCenter() {
   div.innerHTML = `
     <div class="row" style="justify-content: space-between; margin-bottom: 8px;">
       <strong>当前活跃任务</strong>
+      <button class="btn btn-outline btn-sm" id="taskToggleBtn" onclick="toggleTaskCenter()">收起</button>
     </div>
     <div id="taskList" style="font-size: 13px;">加载中...</div>`;
   const container = document.querySelector('.container');
@@ -240,6 +241,14 @@ function injectTaskCenter() {
   } else {
     document.body.insertBefore(div, document.body.firstChild);
   }
+}
+
+function toggleTaskCenter() {
+  const body = document.getElementById('taskList');
+  const btn = document.getElementById('taskToggleBtn');
+  if (!body || !btn) return;
+  const hidden = body.classList.toggle('hidden');
+  btn.textContent = hidden ? '展开' : '收起';
 }
 
 function renderTaskProgress(t) {
