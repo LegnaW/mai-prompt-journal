@@ -47,23 +47,13 @@
         <div class="col">
           <strong>导入</strong>
           <div style="font-size:12px;color:#999;margin:4px 0 8px;line-height:1.6;">
-            上传 jsonl 或 mpj 文件。可先「上传并校验」（mpj 校验码 / 维度 / 抽样相似度，可新建或合并），也可直接导入（跳过校验）。
+            上传 jsonl 或 mpj 文件；mpj 会校验完整性（校验码 / 向量维度 / 抽样相似度），可新建或合并到已有笔记本。
           </div>
           <div class="row" style="gap:8px;flex-wrap:wrap;">
-            <input type="file" id="importFile" accept=".jsonl,.mpj" onchange="onImportFileChange()" style="flex:2;min-width:200px;">
-          </div>
-          <div class="hidden" id="importOptions" style="margin-top:8px;">
-            <div class="row" style="gap:8px;flex-wrap:wrap;">
-              <label>抽样条数</label>
-              <input type="number" id="importSample" value="25" min="1" max="200" style="width:80px;">
-              <button class="btn btn-success" onclick="uploadFile()">上传并校验</button>
-              <button class="btn btn-outline" onclick="doDirectRebuild()">无视已有索引重建索引导入</button>
-              <button class="btn btn-outline" onclick="doDirectImport()">跳过索引校验直接导入（不推荐）</button>
-            </div>
-            <div class="row" style="margin-top:6px;gap:8px;flex-wrap:wrap;">
-              <label>新笔记本名称</label>
-              <input type="text" id="importNewName" style="flex:1;min-width:140px;">
-            </div>
+            <input type="file" id="importFile" accept=".jsonl,.mpj" style="flex:2;min-width:200px;">
+            <label>抽样条数</label>
+            <input type="number" id="importSample" value="25" min="1" max="200" style="width:80px;">
+            <button class="btn btn-success" onclick="uploadFile()">上传并校验</button>
           </div>
         </div>
 
@@ -75,8 +65,8 @@
           <div class="row" style="margin-bottom:6px;gap:8px;flex-wrap:wrap;">
             <select id="exportNotebook" class="notebook-select" onchange="onExportChange()"><option value="default">default</option></select>
             <select id="exportFormat" onchange="onExportChange()">
-              <option value="mpj">mpj</option>
               <option value="jsonl">jsonl</option>
+              <option value="mpj">mpj</option>
             </select>
           </div>
           <div class="row hidden" id="exportModeRow" style="margin-bottom:6px;gap:8px;flex-wrap:wrap;">
@@ -367,50 +357,6 @@ function renderTransferResult(result) {
 }
 
 // ============ 导入预览 ============
-function onImportFileChange() {
-  const file = document.getElementById('importFile').files && document.getElementById('importFile').files[0];
-  document.getElementById('importOptions').classList.toggle('hidden', !file);
-  if (file) {
-    const stem = String(file.name).replace(/\.(jsonl|mpj)$/i, '');
-    document.getElementById('importNewName').value = stem || '';
-  }
-}
-
-function importTargetName() {
-  return document.getElementById('importNewName').value.trim();
-}
-
-function doDirectRebuild() {
-  const file = document.getElementById('importFile').files && document.getElementById('importFile').files[0];
-  if (!file) { alert('请先选择文件'); return; }
-  const name = importTargetName();
-  if (!name) { alert('请输入新笔记本名称'); return; }
-  if (!confirm(`确认忽略 mpj 已有索引、直接用内置 embedding 重建索引导入为新笔记本「${name}」？`)) return;
-  sendDirectImport(file, 'rebuild', name);
-}
-
-function doDirectImport() {
-  const file = document.getElementById('importFile').files && document.getElementById('importFile').files[0];
-  if (!file) { alert('请先选择文件'); return; }
-  const name = importTargetName();
-  if (!name) { alert('请输入新笔记本名称'); return; }
-  if (!confirm(`跳过索引校验直接导入（不推荐）：将直接使用文件自带的索引导入为新笔记本「${name}」。
-\n不校验索引完整性 / 向量维度，若索引损坏或与当前 embedding 不匹配，可能导致检索异常或无法使用。确定继续？`)) return;
-  sendDirectImport(file, 'direct', name);
-}
-
-function sendDirectImport(file, mode, name) {
-  const fd = new FormData();
-  fd.append('file', file);
-  fd.append('mode', mode);
-  fd.append('target_name', name);
-  fetch('/api/import/direct', { method: 'POST', body: fd, cache: 'no-store' }).then(r => r.json()).then(data => {
-    if (data.error) { alert(data.error); return; }
-    showTransferBody();
-    startTransferPolling();
-  }).catch(() => { alert('导入请求失败'); });
-}
-
 function uploadFile() {
   const fileInput = document.getElementById('importFile');
   const file = fileInput.files && fileInput.files[0];
@@ -460,9 +406,10 @@ function renderImportPreview(meta) {
 
   html += `<div class="row" style="margin:10px 0;gap:8px;flex-wrap:wrap;">
     <select id="importTargetType" onchange="onTargetTypeChange()">
-      <option value="new">新建笔记本（名称在上方）</option>
+      <option value="new">新建笔记本</option>
       <option value="merge">合并到已有笔记本</option>
     </select>
+    <input type="text" id="importNewName" placeholder="新笔记本名称" style="flex:1;min-width:140px;">
     <select id="importMergeTarget" class="hidden" style="flex:1;min-width:140px;"></select>
   </div>
   <div id="mergeHint" class="hidden" style="font-size:12px;color:#c62828;margin-bottom:6px;">合并后建议到「去重」页扫描一次去重检测。</div>`;
@@ -497,6 +444,7 @@ function populateMergeOptions() {
 
 function onTargetTypeChange() {
   const t = document.getElementById('importTargetType').value;
+  document.getElementById('importNewName').classList.toggle('hidden', t === 'merge');
   document.getElementById('importMergeTarget').classList.toggle('hidden', t === 'new');
   document.getElementById('mergeHint').classList.toggle('hidden', t !== 'merge');
   updateCommitEnable();
