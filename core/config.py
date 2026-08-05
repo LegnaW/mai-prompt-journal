@@ -218,10 +218,10 @@ class OrganizeDbConfig(PluginConfigBase):
     )
     batch_import_prompt: str = Field(
         default=_BATCH_IMPORT_DEFAULT_PROMPT,
-        description="批量导入追加提示词（已迁移至 [advanced]，此字段仅用于旧配置迁移）",
+        description="txt 批量写入追加提示词（已迁移至 [advanced]，此字段仅用于旧配置迁移）",
         json_schema_extra={
-            "label": "批量导入追加提示词（已废弃）",
-            "hint": "已迁移到『高级』分类下的『批量导入追加提示词』，此字段仅供旧配置自动迁移，请勿直接填写",
+            "label": "txt 批量写入追加提示词（已废弃）",
+            "hint": "已迁移到『高级』分类下的『txt 批量写入追加提示词』，此字段仅供旧配置自动迁移，请勿直接填写",
             "order": 4,
             "hidden": True,
             "x-widget": "textarea",
@@ -315,10 +315,10 @@ class AdvancedConfig(PluginConfigBase):
     )
     batch_import_prompt: str = Field(
         default=_BATCH_IMPORT_DEFAULT_PROMPT,
-        description="批量导入追加提示词（追加在操作数据库系统提示词之后）",
+        description="txt 批量写入追加提示词（追加在操作数据库系统提示词之后）",
         json_schema_extra={
-            "label": "批量导入追加提示词",
-            "hint": "txt 批量导入时追加在系统提示词后的约束文本；{temp-journal} 会被替换为临时笔记本名。一般情况下请勿乱动此项目。",
+            "label": "txt 批量写入追加提示词",
+            "hint": "txt 批量写入时追加在系统提示词后的约束文本；{temp-journal} 会被替换为临时笔记本名。一般情况下请勿乱动此项目。",
             "order": 2,
             "x-widget": "textarea",
             "rows": 4,

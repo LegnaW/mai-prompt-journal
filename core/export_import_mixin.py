@@ -2,17 +2,21 @@
 
 支持两种格式：
 - jsonl：仅源文件；
-- mpj（zip）：jsonl + embeddings.npy + index.meta + checksum.sha256 校验码。
+- mpj：jsonl + embeddings.npy + index.meta + checksum.sha256 校验码。
 
-导出：jsonl / mpj（直接导出当前索引 / 用第三方 embedding 重新生成索引导出）。
-导入：后台任务校验（jsonl 解析 / mpj 校验码 + 维度 + 抽样相似度），确认后后台提交
-（新建或合并）。校验与导入结果持久化在 `data_dir/file_import/`，支持页面刷新不丢。
+导入与导出共用一套"传输状态机"（持久化在 `data_dir/file_io/`，页面刷新不丢）：
+  kind  = "import" | "export"
+  state = none / validating / ready / importing / building / done / error
+由于后台任务走 `_start_task`（占用即拒绝新任务），同一时刻只会有一个导入或导出任务，
+因此一个状态槽即可。导入校验/预览在 `preview.jsonl`+`preview.json`，导出最终产物
+写入 `artifact/`（jsonl 直接复制重命名，mpj 打包），完成后前端提供下载。
 """
 
 import hashlib
 import io
 import json
 import random
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -26,8 +30,6 @@ from .notebook import Notebook, scramble_id
 
 # 内置 embedding 的默认抽样条数（mpj 校验用）
 _DEFAULT_VALIDATE_SAMPLE = 25
-# 前端分页默认每页条数
-_DEFAULT_PREVIEW_PAGE_SIZE = 20
 
 _NOTEBOOK_NAME_RE = r"^[A-Za-z0-9_\-\u4e00-\u9fff]+$"
 
@@ -36,43 +38,71 @@ class ExportImportMixin:
     """笔记本导出与文件导入能力（需与主类组合）。"""
 
     # ============================================================
-    # 导入暂存目录 / 状态（抗刷新）
+    # 统一传输状态机（file_io/，抗刷新）
     # ============================================================
 
-    def _file_import_dir(self) -> Path:
-        return self._data_dir / "file_import"
+    def _io_dir(self) -> Path:
+        return self._data_dir / "file_io"
 
-    def _file_state_path(self) -> Path:
-        return self._file_import_dir() / "state"
+    def _io_kind_path(self) -> Path:
+        return self._io_dir() / "kind"
 
-    def _get_file_state(self) -> str:
+    def _io_state_path(self) -> Path:
+        return self._io_dir() / "state"
+
+    def _io_preview_jsonl_path(self) -> Path:
+        return self._io_dir() / "preview.jsonl"
+
+    def _io_preview_json_path(self) -> Path:
+        return self._io_dir() / "preview.json"
+
+    def _io_result_path(self) -> Path:
+        return self._io_dir() / "result.json"
+
+    def _io_artifact_dir(self) -> Path:
+        return self._io_dir() / "artifact"
+
+    def _reset_io(self) -> None:
+        """清空传输暂存区（新导入/新导出前调用）。"""
+        d = self._io_dir()
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
+        d.mkdir(parents=True, exist_ok=True)
+
+    def _set_io(self, kind: str, state: str) -> None:
+        d = self._io_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "kind").write_text(kind, encoding="utf-8")
+        (d / "state").write_text(state, encoding="utf-8")
+
+    def _get_io_kind(self) -> str:
         try:
-            return self._file_state_path().read_text(encoding="utf-8").strip() or "none"
+            return self._io_kind_path().read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+
+    def _get_io_state(self) -> str:
+        try:
+            return self._io_state_path().read_text(encoding="utf-8").strip() or "none"
         except OSError:
             return "none"
 
-    def _set_file_state(self, state: str) -> None:
-        d = self._file_import_dir()
+    def _write_io_preview(self, meta: dict[str, Any], entries: list[dict[str, Any]]) -> None:
+        d = self._io_dir()
         d.mkdir(parents=True, exist_ok=True)
-        (d / "state").write_text(state, encoding="utf-8")
-
-    def _write_file_preview(self, meta: dict[str, Any], entries: list[dict[str, Any]]) -> None:
-        d = self._file_import_dir()
-        d.mkdir(parents=True, exist_ok=True)
-        with (d / "preview.jsonl").open("w", encoding="utf-8") as f:
+        with self._io_preview_jsonl_path().open("w", encoding="utf-8") as f:
             for e in entries:
                 f.write(json.dumps(e, ensure_ascii=False) + "\n")
-        (d / "preview.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+        self._io_preview_json_path().write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
 
-    def _read_file_preview(self) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        d = self._file_import_dir()
+    def _read_io_preview(self) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         meta: dict[str, Any] = {}
         try:
-            meta = json.loads((d / "preview.json").read_text(encoding="utf-8"))
+            meta = json.loads(self._io_preview_json_path().read_text(encoding="utf-8"))
         except Exception:
             meta = {}
         entries: list[dict[str, Any]] = []
-        p = d / "preview.jsonl"
+        p = self._io_preview_jsonl_path()
         if p.exists():
             for line in p.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
@@ -86,18 +116,25 @@ class ExportImportMixin:
                     entries.append(obj)
         return meta, entries
 
-    def _write_file_result(self, result: dict[str, Any]) -> None:
-        d = self._file_import_dir()
+    def _write_io_result(self, result: dict[str, Any]) -> None:
+        d = self._io_dir()
         d.mkdir(parents=True, exist_ok=True)
-        (d / "result.json").write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+        self._io_result_path().write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
 
-    def _read_file_result(self) -> dict[str, Any]:
-        d = self._file_import_dir()
+    def _read_io_result(self) -> dict[str, Any]:
         try:
-            data = json.loads((d / "result.json").read_text(encoding="utf-8"))
+            data = json.loads(self._io_result_path().read_text(encoding="utf-8"))
             return data if isinstance(data, dict) else {}
         except Exception:
             return {}
+
+    def _save_artifact(self, data: bytes, filename: str) -> None:
+        d = self._io_artifact_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        (d / filename).write_bytes(data)
+
+    def _artifact_path(self, filename: str) -> Path:
+        return self._io_artifact_dir() / filename
 
     # ============================================================
     # jsonl 解析与名称校验
@@ -158,8 +195,44 @@ class ExportImportMixin:
         return bool(re.match(_NOTEBOOK_NAME_RE, name))
 
     # ============================================================
-    # 导出
+    # 导出（后台任务，产物写入 artifact/）
     # ============================================================
+
+    async def _run_export_task(self, task_id: str, notebook: str, fmt: str, mode: str, filename: str) -> None:
+        try:
+            nb = self._get_notebook(notebook)
+            if nb is None:
+                raise RuntimeError(f"笔记本 '{notebook}' 不存在")
+
+            if fmt == "jsonl":
+                if not nb.notes_path.exists():
+                    raise RuntimeError("笔记本无源文件")
+                out_name = filename if filename.endswith(".jsonl") else f"{filename or nb.name}.jsonl"
+                data = nb.notes_path.read_bytes()
+                ctype = "text/plain"
+            elif fmt == "mpj":
+                if mode == "rebuild":
+                    data = await self._export_mpj_rebuild(nb)
+                else:
+                    data = await self._export_mpj_direct(nb)
+                out_name = filename if filename.endswith(".mpj") else f"{filename or nb.name}.mpj"
+                ctype = "application/zip"
+            else:
+                raise RuntimeError("format 只能是 jsonl 或 mpj")
+
+            self._save_artifact(data, out_name)
+            self._set_io("export", "done")
+            self._write_io_result(
+                {"success": True, "message": f"导出完成：{out_name}", "filename": out_name, "size": len(data), "ctype": ctype}
+            )
+            self._finish_task(task_id, {"ok": True, "filename": out_name})
+        except Exception as exc:
+            self.ctx.logger.error(f"导出任务异常: {exc}", exc_info=True)
+            self._set_io("export", "error")
+            self._write_io_result({"error": f"导出失败：{exc}"})
+            self._fail_task(task_id, exc)
+        finally:
+            self._evict_tasks()
 
     async def _export_jsonl(self, nb: Notebook) -> bytes:
         return nb.notes_path.read_bytes()
@@ -244,31 +317,31 @@ class ExportImportMixin:
                     "skipped_count": skipped,
                     "checksum_status": None,
                 }
-                self._write_file_preview(meta, entries)
-                self._set_file_state("ready")
+                self._write_io_preview(meta, entries)
+                self._set_io("import", "ready")
             elif lower.endswith(".mpj"):
                 result = await self._validate_mpj_file(source, sample_n)
                 if "error" in result:
-                    self._set_file_state("error")
-                    self._write_file_result({"error": result["error"]})
+                    self._set_io("import", "error")
+                    self._write_io_result({"error": result["error"]})
                 else:
-                    self._write_file_preview(result["meta"], result["entries"])
-                    self._set_file_state("ready")
+                    self._write_io_preview(result["meta"], result["entries"])
+                    self._set_io("import", "ready")
             else:
-                self._set_file_state("error")
-                self._write_file_result({"error": "不支持的文件类型，仅支持 .jsonl 或 .mpj"})
+                self._set_io("import", "error")
+                self._write_io_result({"error": "不支持的文件类型，仅支持 .jsonl 或 .mpj"})
             self._finish_task(task_id, {"ok": True})
         except Exception as exc:
             self.ctx.logger.error(f"文件导入校验任务异常: {exc}", exc_info=True)
-            self._set_file_state("error")
-            self._write_file_result({"error": f"校验失败：{exc}"})
+            self._set_io("import", "error")
+            self._write_io_result({"error": f"校验失败：{exc}"})
             self._fail_task(task_id, exc)
         finally:
             self._evict_tasks()
 
     async def _validate_mpj_file(self, source: bytes, sample_n: int) -> dict[str, Any]:
         """解压 mpj 并做校验码 / 维度 / 抽样相似度校验。"""
-        unpack_dir = self._file_import_dir() / "unpack"
+        unpack_dir = self._io_dir() / "unpack"
         unpack_dir.mkdir(parents=True, exist_ok=True)
         zip_path = unpack_dir / "upload.mpj"
         zip_path.write_bytes(source)
@@ -341,7 +414,7 @@ class ExportImportMixin:
         self, task_id: str, target_name: str, mode: str, merge_target: str
     ) -> None:
         try:
-            meta, entries = self._read_file_preview()
+            meta, entries = self._read_io_preview()
             fmt = meta.get("format")
             if not entries:
                 raise RuntimeError("没有可导入的条目")
@@ -349,23 +422,23 @@ class ExportImportMixin:
             if fmt == "mpj" and mode == "direct":
                 if merge_target:
                     raise RuntimeError("mpj 直接导入不支持合并到已有笔记本")
-                npy_path = self._file_import_dir() / "unpack" / f"{meta.get('source_name')}.embeddings.npy"
+                npy_path = self._io_dir() / "unpack" / f"{meta.get('source_name')}.embeddings.npy"
                 ok, msg = await self._import_mpj_direct(target_name, entries, npy_path)
             else:
                 ok, msg = await self._import_jsonl_entries(target_name, entries, merge_target)
 
             if ok:
-                self._set_file_state("done")
-                self._write_file_result({"success": True, "message": msg, "notebook": target_name})
+                self._set_io("import", "done")
+                self._write_io_result({"success": True, "message": msg, "notebook": target_name})
                 self._finish_task(task_id, {"ok": True, "message": msg})
             else:
-                self._set_file_state("error")
-                self._write_file_result({"error": msg})
+                self._set_io("import", "error")
+                self._write_io_result({"error": msg})
                 self._fail_task(task_id, msg)
         except Exception as exc:
             self.ctx.logger.error(f"文件导入提交任务异常: {exc}", exc_info=True)
-            self._set_file_state("error")
-            self._write_file_result({"error": f"导入失败：{exc}"})
+            self._set_io("import", "error")
+            self._write_io_result({"error": f"导入失败：{exc}"})
             self._fail_task(task_id, exc)
         finally:
             self._evict_tasks()

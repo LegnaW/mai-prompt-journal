@@ -48,3 +48,17 @@ textarea::placeholder { color: #bbb; }
 .add-form { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 8px; }
 .add-form input { width: 100%; }
 @media (max-width: 600px) { .add-form { grid-template-columns: 1fr; } }
+
+/* 选项卡（笔记本管理页） */
+.tabbar { display: flex; gap: 8px; margin-bottom: 14px; border-bottom: 1px solid #eee; padding-bottom: 8px; }
+.tab {
+  padding: 6px 18px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px;
+  background: #f0f2f5; color: #666;
+}
+.tab:hover { background: #e3e7ee; }
+.tab.active { background: #4f9afe; color: #fff; }
+
+/* 导入/导出两列：宽屏左右，窄屏上下 */
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+.two-col .col { background: #fafbfc; border: 1px solid #eee; border-radius: 8px; padding: 12px; }
+@media (max-width: 700px) { .two-col { grid-template-columns: 1fr; } }

@@ -11,97 +11,123 @@
   <div id="nav"></div>
 
   <div class="card">
-    <div class="row" style="justify-content: space-between; margin-bottom: 8px;">
-      <strong>笔记本管理</strong>
-      <button class="btn btn-outline btn-sm" onclick="loadNotebooks()">刷新</button>
-    </div>
-    <div style="font-size:12px;color:#999;margin-bottom:10px;">
-      可新建空白笔记本，或删除已有笔记本。删除后该笔记本的笔记数据将不可恢复；default 与临时笔记本不可删除。
+    <div class="tabbar">
+      <button class="tab active" id="tabBtnManage" onclick="switchTab('manage')">笔记本管理</button>
+      <button class="tab" id="tabBtnTransfer" onclick="switchTab('transfer')">导入 / 导出</button>
     </div>
 
-    <div class="row" style="margin-bottom:14px;gap:8px;">
-      <input type="text" id="newNotebookName" placeholder="新笔记本名称（中文/字母/数字/下划线/连字符）" style="flex:1;" onkeydown="if(event.key==='Enter')doCreateNotebook()">
-      <button class="btn" onclick="doCreateNotebook()">新建笔记本</button>
-    </div>
-
-    <div id="notebookList"></div>
-  </div>
-
-  <div class="card">
-    <div class="row" style="justify-content: space-between; margin-bottom: 8px;">
-      <strong>上传 / 下载笔记本</strong>
-    </div>
-    <div style="font-size:12px;color:#999;margin-bottom:12px;line-height:1.7;">
-      支持 jsonl（仅笔记数据）与 mpj（笔记 + 索引 + 校验码）两种格式。上传 mpj 会校验完整性并抽样检查索引；校验 / 导入均为后台任务，页面刷新不丢进度。
-    </div>
-
-    <div class="row" style="margin-bottom:6px;gap:8px;flex-wrap:wrap;align-items:center;">
-      <strong>下载</strong>
-      <label>笔记本</label>
-      <select id="exportNotebook" class="notebook-select" onchange="onExportChange()"><option value="default">default</option></select>
-      <label>格式</label>
-      <select id="exportFormat" onchange="onExportChange()">
-        <option value="jsonl">jsonl</option>
-        <option value="mpj">mpj</option>
-      </select>
-      <label>文件名</label>
-      <input type="text" id="exportFilename" style="flex:1;min-width:140px;">
-      <button class="btn" onclick="doExport()">下载</button>
-    </div>
-
-    <div class="row hidden" id="exportModeRow" style="margin-bottom:6px;gap:8px;flex-wrap:wrap;align-items:center;">
-      <label>mpj 导出方式</label>
-      <select id="exportMode" onchange="onExportModeChange()">
-        <option value="direct">直接导出（使用当前索引）</option>
-        <option value="rebuild">用第三方 embedding 重新生成索引导出</option>
-      </select>
-    </div>
-
-    <div class="hidden" id="embeddingConfigRow" style="margin-top:8px;padding:12px;background:#f8f9fa;border-radius:8px;">
-      <div style="font-size:12px;color:#333;margin-bottom:8px;">第三方 embedding 配置（用于重新生成索引导出；保存到服务器，下次自动预填）</div>
-      <div style="display:grid;grid-template-columns:auto 1fr;gap:6px 12px;align-items:center;font-size:13px;color:#333;">
-        <label for="embBaseUrl">API 地址</label>
-        <input type="text" id="embBaseUrl" placeholder="如 https://api.example.com/v1">
-        <label for="embApiKey">API 密钥</label>
-        <input type="text" id="embApiKey" placeholder="sk-...">
-        <label for="embModel">模型名</label>
-        <input type="text" id="embModel" placeholder="如 text-embedding-3-small">
-        <label for="embTimeout">超时（秒）</label>
-        <input type="number" id="embTimeout" value="60" min="5" max="600">
+    <!-- ========== 选项卡一：笔记本管理（含备份） ========== -->
+    <div id="tabManage">
+      <div class="row" style="margin-bottom:12px;gap:8px;">
+        <input type="text" id="newNotebookName" placeholder="新笔记本名称（中文/字母/数字/下划线/连字符）" style="flex:1;" onkeydown="if(event.key==='Enter')doCreateNotebook()">
+        <button class="btn" onclick="doCreateNotebook()">新建笔记本</button>
+        <button class="btn btn-outline btn-sm" onclick="loadNotebooks()">刷新</button>
       </div>
-      <div style="margin-top:10px;"><button class="btn btn-outline btn-sm" onclick="saveEmbeddingProfile()">保存配置</button></div>
-    </div>
-
-    <div style="border-top:1px solid #eee;margin:12px 0;"></div>
-
-    <div class="row" style="gap:8px;flex-wrap:wrap;margin-bottom:6px;align-items:center;">
-      <strong>上传</strong>
-      <input type="file" id="importFile" accept=".jsonl,.mpj" style="flex:2;min-width:200px;">
-      <label>抽样条数</label>
-      <input type="number" id="importSample" value="25" min="1" max="200" style="width:80px;">
-      <button class="btn btn-success" onclick="uploadFile()">上传并校验</button>
-    </div>
-    <div id="fileImportStatus" style="font-size:13px;color:#666;"></div>
-
-    <div class="card hidden" id="importPreviewCard" style="margin-top:10px;">
-      <div class="row" style="justify-content: space-between; margin-bottom: 8px;">
-        <strong id="importPreviewTitle">导入预览</strong>
-        <button class="btn btn-outline btn-sm" id="importPreviewToggleBtn" onclick="toggleImportPreview()">展开</button>
+      <div style="font-size:12px;color:#999;margin-bottom:8px;">
+        可新建空白笔记本，或删除已有笔记本。删除后该笔记本的笔记数据将不可恢复；default 与临时笔记本不可删除。
       </div>
-      <div id="importPreviewBody" class="hidden"></div>
+      <div id="notebookList"></div>
+
+      <div style="border-top:1px solid #eee;margin:14px 0;"></div>
+      <div class="row" style="margin-bottom:8px;">
+        <strong>备份</strong>
+        <label>笔记本</label>
+        <select id="backupNotebook" class="notebook-select" onchange="loadBackups()"><option value="default">default</option></select>
+        <button class="btn btn-outline btn-sm" onclick="loadBackups()">刷新备份</button>
+      </div>
+      <div style="font-size:12px;color:#999;margin-bottom:8px;line-height:1.7;">
+        每次笔记本被修改后自动按时间戳备份（上限可在插件配置『备份』分类调整）。恢复前会自动先备份当前状态，便于撤销。
+      </div>
+      <div id="backupList"></div>
+    </div>
+
+    <!-- ========== 选项卡二：导入 / 导出 ========== -->
+    <div id="tabTransfer" class="hidden">
+      <div class="two-col">
+        <div class="col">
+          <strong>导入</strong>
+          <div style="font-size:12px;color:#999;margin:4px 0 8px;line-height:1.6;">
+            上传 jsonl 或 mpj 文件；mpj 会校验完整性（校验码 / 向量维度 / 抽样相似度），可新建或合并到已有笔记本。
+          </div>
+          <div class="row" style="gap:8px;flex-wrap:wrap;">
+            <input type="file" id="importFile" accept=".jsonl,.mpj" style="flex:2;min-width:200px;">
+            <label>抽样条数</label>
+            <input type="number" id="importSample" value="25" min="1" max="200" style="width:80px;">
+            <button class="btn btn-success" onclick="uploadFile()">上传并校验</button>
+          </div>
+        </div>
+
+        <div class="col">
+          <strong>导出</strong>
+          <div style="font-size:12px;color:#999;margin:4px 0 8px;line-height:1.6;">
+            支持 jsonl 与 mpj（含索引 + 校验码）；mpj 可"直接导出"或"用第三方 embedding 重新生成索引导出"。导出完成后在下方状态区下载。
+          </div>
+          <div class="row" style="margin-bottom:6px;gap:8px;flex-wrap:wrap;">
+            <select id="exportNotebook" class="notebook-select" onchange="onExportChange()"><option value="default">default</option></select>
+            <select id="exportFormat" onchange="onExportChange()">
+              <option value="jsonl">jsonl</option>
+              <option value="mpj">mpj</option>
+            </select>
+          </div>
+          <div class="row hidden" id="exportModeRow" style="margin-bottom:6px;gap:8px;flex-wrap:wrap;">
+            <select id="exportMode" onchange="onExportModeChange()">
+              <option value="direct">直接导出（使用当前索引）</option>
+              <option value="rebuild">用第三方 embedding 重新生成索引导出</option>
+            </select>
+          </div>
+          <div class="row" style="margin-bottom:6px;gap:8px;flex-wrap:wrap;">
+            <label>文件名</label>
+            <input type="text" id="exportFilename" style="flex:1;min-width:140px;">
+            <button class="btn" onclick="doExport()">开始导出</button>
+          </div>
+          <div class="hidden" id="embeddingConfigRow" style="margin-top:8px;padding:12px;background:#f8f9fa;border-radius:8px;">
+            <div style="font-size:12px;color:#333;margin-bottom:8px;">第三方 embedding 配置（用于重新生成索引导出；保存到服务器，下次自动预填）</div>
+            <div style="display:grid;grid-template-columns:auto 1fr;gap:6px 12px;align-items:center;font-size:13px;color:#333;">
+              <label for="embBaseUrl">API 地址</label>
+              <input type="text" id="embBaseUrl" placeholder="如 https://api.example.com/v1">
+              <label for="embApiKey">API 密钥</label>
+              <input type="text" id="embApiKey" placeholder="sk-...">
+              <label for="embModel">模型名</label>
+              <input type="text" id="embModel" placeholder="如 text-embedding-3-small">
+              <label for="embTimeout">超时（秒）</label>
+              <input type="number" id="embTimeout" value="60" min="5" max="600">
+            </div>
+            <div style="margin-top:10px;"><button class="btn btn-outline btn-sm" onclick="saveEmbeddingProfile()">保存配置</button></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 统一传输状态机元素 -->
+      <div class="card" style="margin-top:12px;">
+        <div class="row" style="justify-content: space-between; margin-bottom: 8px;">
+          <strong>传输状态</strong>
+          <button class="btn btn-outline btn-sm" id="transferToggleBtn" onclick="toggleTransferBody()">展开</button>
+        </div>
+        <div id="transferStatus" class="hidden" style="font-size:13px;color:#666;"></div>
+      </div>
     </div>
   </div>
 </div>
 
 <script src="/web/app.js"></script>
 <script>
-let previewMeta = null;
-let previewEntries = [];
+let allNotebooks = [];
 let previewPage = 1;
 const PREVIEW_PAGE_SIZE = 20;
-let fileStateTimer = null;
-let allNotebooks = [];
+let transferTimer = null;
+let transferBodyVisible = false;
 
+// ============ 选项卡 ============
+function switchTab(name) {
+  document.getElementById('tabManage').classList.toggle('hidden', name !== 'manage');
+  document.getElementById('tabTransfer').classList.toggle('hidden', name !== 'transfer');
+  document.getElementById('tabBtnManage').classList.toggle('active', name === 'manage');
+  document.getElementById('tabBtnTransfer').classList.toggle('active', name === 'transfer');
+  if (name === 'manage') { loadNotebooks(); loadBackups(); }
+  if (name === 'transfer') pollTransferState();
+}
+
+// ============ 笔记本管理 + 备份 ============
 function loadNotebooks() {
   const div = document.getElementById('notebookList');
   div.innerHTML = '<p style="color:#999">加载中...</p>';
@@ -128,22 +154,97 @@ function loadNotebooks() {
 }
 
 function populateSelects(notebooks) {
+  const opts = notebooks.map(n => `<option value="${esc(n.name)}">${esc(n.name)}</option>`).join('') || '<option value="default">default</option>';
   const exp = document.getElementById('exportNotebook');
-  const cur = exp.value || 'default';
-  exp.innerHTML = notebooks.map(n => `<option value="${esc(n.name)}">${esc(n.name)}</option>`).join('') || '<option value="default">default</option>';
-  exp.value = cur;
-  populateMergeOptions(notebooks);
+  const curE = exp.value || 'default';
+  exp.innerHTML = opts;
+  exp.value = curE;
+  const bak = document.getElementById('backupNotebook');
+  const curB = bak.value || 'default';
+  bak.innerHTML = opts;
+  bak.value = curB;
+  const merge = document.getElementById('importMergeTarget');
+  if (merge) {
+    const curM = merge.value || '';
+    merge.innerHTML = '<option value="">（新建笔记本）</option>' + notebooks.map(n => `<option value="${esc(n.name)}">${esc(n.name)}</option>`).join('');
+    merge.value = curM;
+  }
   onExportChange();
 }
 
-function populateMergeOptions(notebooks) {
-  const merge = document.getElementById('importMergeTarget');
-  if (!merge) return;
-  const cur = merge.value || '';
-  merge.innerHTML = '<option value="">（新建笔记本）</option>' + notebooks.map(n => `<option value="${esc(n.name)}">${esc(n.name)}</option>`).join('');
-  merge.value = cur;
+function doCreateNotebook() {
+  const input = document.getElementById('newNotebookName');
+  const name = input.value.trim();
+  if (!name) { alert('请输入笔记本名称'); return; }
+  api('POST', '/api/notebooks/create', { name: name }).then(data => {
+    if (data.error) { alert(data.error); return; }
+    alert(`已创建空白笔记本 ${name}`);
+    input.value = '';
+    loadNotebooks();
+    loadStatus();
+  }).catch(() => {});
 }
 
+function doDeleteNotebook(name, count) {
+  if (!confirm(`确认删除笔记本 "${name}"？共 ${count} 条笔记，删除后不可恢复。`)) return;
+  api('POST', '/api/notebooks/delete', { name: name }).then(data => {
+    if (data.error) { alert(data.error); return; }
+    alert(`已删除笔记本 ${name}`);
+    loadNotebooks();
+    loadStatus();
+  }).catch(() => {});
+}
+
+// ============ 备份 ============
+function loadBackups() {
+  const nb = document.getElementById('backupNotebook').value;
+  const div = document.getElementById('backupList');
+  div.innerHTML = '<p style="color:#999">加载中...</p>';
+  api('GET', `/api/backups?notebook=${encodeURIComponent(nb)}`).then(data => {
+    if (data.error) { div.innerHTML = `<p style="color:#c62828">${esc(data.error)}</p>`; return; }
+    if (!data.backups || data.backups.length === 0) {
+      div.innerHTML = '<p style="color:#2e7d32">暂无备份。笔记本被修改后会自动生成。</p>';
+      return;
+    }
+    div.innerHTML = `<p style="color:#333;margin-bottom:6px;">共 ${data.backups.length} 份备份：</p>
+      <table>
+        <thead><tr><th>时间</th><th>条目数</th><th>大小</th><th>操作</th></tr></thead>
+        <tbody>` +
+      data.backups.map(b => `<tr>
+        <td>${esc(b.timestamp)}</td>
+        <td>${b.count}</td>
+        <td>${b.size} B</td>
+        <td>
+          <button class="btn btn-sm" onclick="doBackupRestore('${esc(b.timestamp)}')">恢复</button>
+          <button class="btn btn-danger btn-sm" onclick="doBackupDelete('${esc(b.timestamp)}')">删除</button>
+        </td>
+      </tr>`).join('') + '</tbody></table>';
+  }).catch(() => {});
+}
+
+function doBackupRestore(timestamp) {
+  const nb = document.getElementById('backupNotebook').value;
+  if (!confirm(`确认将笔记本「${nb}」恢复到备份 ${timestamp}？恢复前会自动备份当前状态。`)) return;
+  api('POST', '/api/backups/restore', { notebook: nb, timestamp: timestamp }).then(data => {
+    if (data.error) { alert(data.error); return; }
+    alert(data.message || '已恢复');
+    loadBackups();
+    loadNotebooks();
+    loadStatus();
+  }).catch(() => {});
+}
+
+function doBackupDelete(timestamp) {
+  const nb = document.getElementById('backupNotebook').value;
+  if (!confirm(`确认删除备份 ${timestamp}？`)) return;
+  api('POST', '/api/backups/delete', { notebook: nb, timestamp: timestamp }).then(data => {
+    if (data.error) { alert(data.error); return; }
+    alert(data.message || '已删除');
+    loadBackups();
+  }).catch(() => {});
+}
+
+// ============ 导出 ============
 function onExportChange() {
   const fmt = document.getElementById('exportFormat').value;
   document.getElementById('exportModeRow').classList.toggle('hidden', fmt !== 'mpj');
@@ -184,16 +285,78 @@ function saveEmbeddingProfile() {
 }
 
 function doExport() {
-  const notebook = document.getElementById('exportNotebook').value;
-  const format = document.getElementById('exportFormat').value;
-  const mode = format === 'mpj' ? document.getElementById('exportMode').value : 'direct';
-  let filename = document.getElementById('exportFilename').value.trim();
-  const params = new URLSearchParams({ notebook: notebook, format: format, mode: mode, filename: filename });
-  window.location.href = `/api/export?${params.toString()}`;
+  const body = {
+    notebook: document.getElementById('exportNotebook').value,
+    format: document.getElementById('exportFormat').value,
+    mode: document.getElementById('exportFormat').value === 'mpj' ? document.getElementById('exportMode').value : 'direct',
+    filename: document.getElementById('exportFilename').value.trim(),
+  };
+  api('POST', '/api/export/start', body).then(data => {
+    if (data.error) { alert(data.error); return; }
+    showTransferBody();
+    startTransferPolling();
+  }).catch(() => {});
 }
 
-// ============ 上传与导入预览 ============
+// ============ 统一传输状态机 ============
+function toggleTransferBody() {
+  transferBodyVisible = !transferBodyVisible;
+  document.getElementById('transferStatus').classList.toggle('hidden', !transferBodyVisible);
+  document.getElementById('transferToggleBtn').textContent = transferBodyVisible ? '收起' : '展开';
+}
+function showTransferBody() {
+  if (!transferBodyVisible) toggleTransferBody();
+}
+function hideTransferBody() {
+  if (transferBodyVisible) toggleTransferBody();
+}
 
+function startTransferPolling() {
+  if (transferTimer) clearInterval(transferTimer);
+  pollTransferState();
+  transferTimer = setInterval(pollTransferState, 2000);
+}
+function stopTransferPolling() {
+  if (transferTimer) { clearInterval(transferTimer); transferTimer = null; }
+}
+
+function pollTransferState() {
+  api('GET', '/api/transfer/state').then(data => {
+    const status = document.getElementById('transferStatus');
+    if (data.state === 'none') {
+      stopTransferPolling();
+      hideTransferBody();
+      status.innerHTML = '';
+      return;
+    }
+    showTransferBody();
+    if (data.kind === 'import') {
+      if (data.state === 'validating') status.innerHTML = '<p>正在校验文件...</p>';
+      else if (data.state === 'importing') status.innerHTML = '<p>正在导入...</p>';
+      else if (data.state === 'ready') renderImportPreview(data.preview || {});
+      else if (data.state === 'done') { stopTransferPolling(); renderTransferResult(data.result || {}); loadNotebooks(); loadStatus(); }
+      else if (data.state === 'error') { stopTransferPolling(); renderTransferResult(data.result || { error: '校验或导入失败' }); }
+    } else if (data.kind === 'export') {
+      if (data.state === 'building') status.innerHTML = '<p>正在生成导出...</p>';
+      else if (data.state === 'done') { stopTransferPolling(); renderTransferResult(data.result || {}); }
+      else if (data.state === 'error') { stopTransferPolling(); renderTransferResult(data.result || { error: '导出失败' }); }
+    }
+  }).catch(() => {});
+}
+
+function renderTransferResult(result) {
+  const status = document.getElementById('transferStatus');
+  if (result.error) {
+    status.innerHTML = `<p style="color:#c62828">${esc(result.error)}</p>`;
+  } else if (result.filename) {
+    status.innerHTML = `<p style="color:#2e7d32">${esc(result.message || '导出完成')}</p>
+      <p style="margin-top:8px;"><a class="btn" href="/api/export/download">下载 ${esc(result.filename)}</a></p>`;
+  } else {
+    status.innerHTML = `<p style="color:#2e7d32">${esc(result.message || '完成')}</p>`;
+  }
+}
+
+// ============ 导入预览 ============
 function uploadFile() {
   const fileInput = document.getElementById('importFile');
   const file = fileInput.files && fileInput.files[0];
@@ -202,83 +365,29 @@ function uploadFile() {
   const fd = new FormData();
   fd.append('file', file);
   fd.append('sample', String(sample));
-  const status = document.getElementById('fileImportStatus');
-  status.innerHTML = '上传中...';
   fetch('/api/import/file', { method: 'POST', body: fd, cache: 'no-store' }).then(r => r.json()).then(data => {
-    if (data.error) { status.innerHTML = `<span style="color:#c62828">${esc(data.error)}</span>`; return; }
-    startFilePolling();
-  }).catch(() => { status.innerHTML = '<span style="color:#c62828">上传失败</span>'; });
+    if (data.error) { alert(data.error); return; }
+    showTransferBody();
+    startTransferPolling();
+  }).catch(() => { alert('上传失败'); });
 }
 
-function startFilePolling() {
-  if (fileStateTimer) clearInterval(fileStateTimer);
-  pollFileState();
-  fileStateTimer = setInterval(pollFileState, 2000);
-}
-
-function stopFilePolling() {
-  if (fileStateTimer) { clearInterval(fileStateTimer); fileStateTimer = null; }
-}
-
-function pollFileState() {
-  api('GET', '/api/import/file_state').then(data => {
-    const status = document.getElementById('fileImportStatus');
-    if (data.state === 'validating') {
-      status.innerHTML = '<span style="color:#666">正在校验文件...</span>';
-    } else if (data.state === 'importing') {
-      status.innerHTML = '<span style="color:#666">正在导入...</span>';
-    } else if (data.state === 'ready') {
-      stopFilePolling();
-      previewMeta = data.preview || {};
-      status.innerHTML = '<span style="color:#2e7d32">校验完成，请查看下方预览。</span>';
-      renderImportPreview();
-    } else if (data.state === 'done') {
-      stopFilePolling();
-      status.innerHTML = `<span style="color:#2e7d32">${esc((data.result && data.result.message) || '导入完成')}</span>`;
-      showResult(data.result || {});
-      loadNotebooks();
-      loadStatus();
-    } else if (data.state === 'error') {
-      stopFilePolling();
-      const msg = (data.result && data.result.error) || '校验或导入失败';
-      status.innerHTML = `<span style="color:#c62828">${esc(msg)}</span>`;
-      showResult(data.result || { error: msg });
-    } else {
-      // none
-      stopFilePolling();
-    }
-  }).catch(() => {});
-}
-
-function toggleImportPreview() {
-  const body = document.getElementById('importPreviewBody');
-  const btn = document.getElementById('importPreviewToggleBtn');
-  const hidden = body.classList.toggle('hidden');
-  btn.textContent = hidden ? '展开' : '收起';
-}
-
-function renderImportPreview() {
-  const meta = previewMeta;
-  if (!meta) return;
-  document.getElementById('importPreviewCard').classList.remove('hidden');
-  const body = document.getElementById('importPreviewBody');
-  const btn = document.getElementById('importPreviewToggleBtn');
-  body.classList.add('hidden');
-  btn.textContent = '展开';
-
+function renderImportPreview(meta) {
+  window.__previewMeta = meta;
+  const status = document.getElementById('transferStatus');
   const isMpj = meta.format === 'mpj';
   const tampered = isMpj && meta.checksum_status !== 'ok';
   const dimOk = meta.dim_match !== false;
   const countOk = meta.count_match !== false;
 
-  let html = '<div style="font-size:13px;line-height:1.8;color:#333;">';
-  html += `<div><strong>格式：</strong>${isMpj ? 'mpj' : 'jsonl'}　<strong>有效条目：</strong>${meta.valid_count}　<strong>跳过：</strong>${meta.skipped_count || 0}</div>`;
+  let html = '<div style="line-height:1.8;color:#333;">';
+  html += `<p><strong>格式：</strong>${isMpj ? 'mpj' : 'jsonl'}　<strong>有效条目：</strong>${meta.valid_count}　<strong>跳过：</strong>${meta.skipped_count || 0}</p>`;
   if (isMpj) {
-    html += `<div><strong>校验码：</strong>${tampered ? '<span style="color:#c62828">不一致或缺失（可能被第三方修改）</span>' : '<span style="color:#2e7d32">一致 ✓</span>'}</div>`;
-    html += `<div><strong>向量维度：</strong>${meta.dim}　<strong>与内置 embedding 一致：</strong>${dimOk ? '是' : '否'}</div>`;
-    html += `<div><strong>条目数 = 向量数：</strong>${countOk ? '是' : '否'}</div>`;
+    html += `<p><strong>校验码：</strong>${tampered ? '<span style="color:#c62828">不一致或缺失（可能被第三方修改）</span>' : '<span style="color:#2e7d32">一致 ✓</span>'}</p>`;
+    html += `<p><strong>向量维度：</strong>${meta.dim}　<strong>与内置 embedding 一致：</strong>${dimOk ? '是' : '否'}</p>`;
+    html += `<p><strong>条目数 = 向量数：</strong>${countOk ? '是' : '否'}</p>`;
     if (meta.sample && meta.sample.n > 0) {
-      html += `<div><strong>抽样相似度（n=${meta.sample.n}）：</strong>平均 ${meta.sample.avg}　最小 ${meta.sample.min}</div>`;
+      html += `<p><strong>抽样相似度（n=${meta.sample.n}）：</strong>平均 ${meta.sample.avg}　最小 ${meta.sample.min}</p>`;
     }
   }
   html += '</div>';
@@ -317,12 +426,20 @@ function renderImportPreview() {
 
   html += `<button class="btn btn-success" id="commitBtn" onclick="doCommit()">确认导入</button>
   <div id="previewEntries" style="margin-top:12px;"></div>`;
-  body.innerHTML = html;
+  status.innerHTML = html;
 
-  populateMergeOptions(allNotebooks);
+  populateMergeOptions();
   onTargetTypeChange();
   loadPreviewPage(1);
   updateCommitEnable();
+}
+
+function populateMergeOptions() {
+  const merge = document.getElementById('importMergeTarget');
+  if (!merge) return;
+  const cur = merge.value || '';
+  merge.innerHTML = '<option value="">（新建笔记本）</option>' + allNotebooks.map(n => `<option value="${esc(n.name)}">${esc(n.name)}</option>`).join('');
+  merge.value = cur;
 }
 
 function onTargetTypeChange() {
@@ -337,8 +454,12 @@ function updateCommitEnable() {
   const btn = document.getElementById('commitBtn');
   if (!btn) return;
   const tamperAck = document.getElementById('tamperAck');
-  const tampered = previewMeta && previewMeta.format === 'mpj' && previewMeta.checksum_status !== 'ok';
+  const meta = transferMeta();
+  const tampered = meta && meta.format === 'mpj' && meta.checksum_status !== 'ok';
   btn.disabled = tampered && !(tamperAck && tamperAck.checked);
+}
+function transferMeta() {
+  return window.__previewMeta || null;
 }
 
 function loadPreviewPage(page) {
@@ -362,8 +483,6 @@ function loadPreviewPage(page) {
 }
 
 function doCommit() {
-  const meta = previewMeta;
-  if (!meta) return;
   const t = document.getElementById('importTargetType').value;
   const body = { mode: 'rebuild', target_name: '', merge_target: '' };
   if (t === 'merge') {
@@ -373,30 +492,24 @@ function doCommit() {
     body.target_name = document.getElementById('importNewName').value.trim();
     if (!body.target_name) { alert('请输入新笔记本名称'); return; }
   }
-  if (meta.format === 'mpj' && meta.dim_match !== false && meta.count_match !== false) {
+  const meta = transferMeta();
+  if (meta && meta.format === 'mpj' && meta.dim_match !== false && meta.count_match !== false) {
     const modeEl = document.getElementById('importMode');
     body.mode = modeEl ? modeEl.value : 'rebuild';
   }
   api('POST', '/api/import/file_commit', body).then(data => {
     if (data.error) { alert(data.error); return; }
-    document.getElementById('fileImportStatus').innerHTML = '<span style="color:#666">正在导入...</span>';
-    startFilePolling();
+    startTransferPolling();
   }).catch(() => {});
 }
 
-function showResult(result) {
-  const status = document.getElementById('fileImportStatus');
-  status.innerHTML = result.error
-    ? `<span style="color:#c62828">${esc(result.error)}</span>`
-    : `<span style="color:#2e7d32">${esc(result.message || '完成')}</span>`;
-}
-
+// ============ 初始化 ============
 injectNav('notebooks');
 loadEmbeddingProfile();
 loadNotebooks();
 loadStatus();
-// 抗刷新：页面加载时检查是否有进行中的导入/可预览的校验
-pollFileState();
+// 抗刷新：页面加载时检查是否有进行中的传输 / 可预览的校验
+pollTransferState();
 </script>
 </body>
 </html>

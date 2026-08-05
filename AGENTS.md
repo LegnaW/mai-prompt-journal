@@ -35,7 +35,7 @@
 | `core/config.py` | 全部配置模型（`PromptJournalConfig` 及各节） |
 | `core/notebook.py` | `Notebook` 数据模型 + `scramble_id` / `_split_txt` |
 | `core/search_mixin.py` | `SearchMixin`：向量搜索、索引重建、embedding 助手、写入去重检测 |
-| `core/organize_mixin.py` | `OrganizeMixin`：LLM 直连、去重整理、操作数据库、批量导入的 agent 循环 |
+| `core/organize_mixin.py` | `OrganizeMixin`：LLM 直连、去重整理、操作数据库、txt 批量写入的 agent 循环 |
 | `core/json_utils.py` | 宽容 JSON 解析（`parse_lenient_json`：多候选提取 + strict=False/去尾逗号/非法转义/单引号修复） |
 | `core/backup_mixin.py` | `BackupMixin`：笔记本自动备份（创建/列表/恢复/删除/上限淘汰，`data_dir/backups/{name}/{时间戳}.jsonl`） |
 | `core/export_import_mixin.py` | `ExportImportMixin`：笔记本导出（jsonl/mpj）/ 文件导入（后台校验 + 提交 + 抗刷新暂存 `data_dir/file_import/`） |
@@ -45,7 +45,7 @@
 | `web/index.html` | WebUI 首页（状态栏 + 搜索/浏览 + 添加） |
 | `web/dedup.html` | WebUI 去重页 |
 | `web/organize.html` | WebUI 操作数据库页 |
-| `web/import.html` | WebUI txt 批量导入页 |
+| `web/import.html` | WebUI txt 批量写入页 |
 | `web/notebooks.html` | WebUI 笔记本管理页（新建空白笔记本 / 删除笔记本） |
 | `web/backups.html` | WebUI 备份页（查看/恢复/删除备份） |
 | `web/app.js` | WebUI 共享逻辑（api/esc/登录/loadStatus/导航注入 + 全局导航右侧的刷新/重建索引/全量重构索引按钮） |
@@ -200,7 +200,7 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 - `POST /api/organize_db/apply` 成功后清除对应 `session_id` 会话。
 - 前端对话框内：方案预览（每条操作独立元素 + 复选框默认全选，按类型配色：新增浅绿/修改浅蓝/删除浅红）+ [补充要求输入框 + 追加要求] + [执行已选] + [全选/全不选] + [清除]，每轮刷新只显示最新方案。`renderOrganizeDbPlan` 用 `data-idx` 记录操作索引，`doOrganizeDbApply` 只提交勾选的 operations 子集。
 
-## txt 批量导入（WebUI 功能）
+## txt 批量写入（WebUI 功能）
 
 把一份 txt 按段落批量交给 LLM 处理，写入临时笔记本，完成后可查看/编辑/处置。
 
@@ -214,27 +214,31 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 - **API**：`POST /api/import/preview`（切分预览）/ `POST /api/import/start` / `GET /api/import/status` / `GET /api/import/tmp_notes` / `GET /api/import/log` / `POST /api/import/resolve`。
 - 导入走通用任务中心 `_start_task("import", ...)`，与 rebuild 互斥（进行中拒绝新任务，409）；进度在导入页 + 顶部任务栏同步显示。
 
-## 笔记本上传 / 下载（`web/notebooks.html` 区块）
+## 笔记本上传 / 下载（`web/notebooks.html` 「导入 / 导出」选项卡）
 
-### 导出（下载）
-- `jsonl`：仅 `{name}.jsonl`。
-- `mpj`（zip）：`{name}.jsonl` + `.embeddings.npy` + `.index.meta` + `checksum.sha256`（**不含 cache**）。
-  - `mode=direct`：打包当前索引；`mode=rebuild`：用**第三方 embedding**（`data_dir/embedding_profile.json`，WebUI 可保存复用）对所有条目重新生成索引后打包。
-- `GET /api/export?notebook=&format=&mode=&filename=` 返回附件。
+> 导入与导出共用一套**统一传输状态机**（持久化在 `data_dir/file_io/`，页面刷新不丢）：
+> `kind` = import | export；`state` = none / validating / ready / importing / building / done / error。
+> 由于后台任务走 `_start_task`（占用即拒绝新任务），同一时刻只会有一个导入或导出任务，一个状态槽即可。
+> 前端 `web/notebooks.html` 在「导入 / 导出」选项卡下用**一个统一状态元素**渲染（左侧导入、右侧导出两列，移动端上下堆叠）。
+
+### 导出（一律后台任务，产物写入 `file_io/artifact/`）
+- `POST /api/export/start` `{notebook, format, mode, filename}` → `kind=export, state=building` → 后台任务。
+- jsonl：直接复制源文件重命名到 `artifact/`；mpj（`mode=direct` 打包当前索引 / `mode=rebuild` 用第三方 embedding `data_dir/embedding_profile.json` 重新生成索引后打包，含校验码）写入 `artifact/`。
+- 完成 → `state=done`，`result.json` 存 `{filename, size, ctype}`；`GET /api/export/download` 下载产物。
 
 ### 导入（后台任务 + 抗刷新）
-- `POST /api/import/file`（multipart：`file` + `sample` 抽样数）→ 重置 `data_dir/file_import/` → `state=validating` → 起后台校验任务。
+- `POST /api/import/file`（multipart：`file` + `sample` 抽样数）→ `_reset_io()` → `kind=import, state=validating` → 起后台校验任务。
 - 校验：jsonl 解析（`_parse_import_jsonl`：缺 id 补 `scramble_id`、缺 ts 补当前时间、坏行计入 skipped）；mpj 解包 → 校验码 → 维度（内置 embedding 探针）→ 条目数=向量数 → 维度一致时抽样（默认 25，前端可指定）用内置 embedding 重算余弦 → 平均/最小相似度。结果写 `preview.jsonl` + `preview.json`，`state=ready`。
 - **校验码**：`checksum.sha256` 缺失或对不上都视为"可能被第三方修改"，前端显示警告并要求勾选"我已了解风险"才能提交（同一警告文案）。
-- `GET /api/import/file_state`（抗刷新）/ `GET /api/import/file_preview?page=&size=`（分页展示全部条目）/ `POST /api/import/file_commit`。
+- `GET /api/transfer/state`（统一状态查询，抗刷新）/ `GET /api/import/file_preview?page=&size=`（分页展示全部条目）/ `POST /api/import/file_commit`。
 - 提交：jsonl / mpj-rebuild → 内置 embedding 全量建索引 → **新建或合并**（合并时重生成 id 防冲突，前端提醒去重）；mpj-direct → 保留 mpj 自带索引（仅新建，需维度一致 + 条目数=向量数）。
-- 状态机持久化在 `data_dir/file_import/state`（none/validating/ready/importing/done/error），刷新不丢。
 - `client_max_size` 已放宽到 256MB（支持大 mpj）。
 
 ### 关键约束
 - 新增导出/导入逻辑放 `ExportImportMixin`；mpj 打包校验在 `core/mpj.py`；第三方 embedding 在 `core/embedding_client.py`。
 - **校验码不是加密签名**：能发现内容被改动，但防不住懂行的人重算校验码重打包。
 - 导入会修改/新建笔记本：新建不触发备份，**合并会触发备份**（`_import_jsonl_entries` 里已调 `_create_backup`）。
+- 备份功能已并入 `web/notebooks.html`「笔记本管理」选项卡（独立 `web/backups.html` 已删除，`/api/backups/*` 接口保留）。
 
 ## 配置节布局与版本迁移（v2.3.1）
 
@@ -358,7 +362,7 @@ schema = generate_plugin_config_schema(m.PromptJournalConfig)
 无 pytest。改完必须：
 1. `python3 -m py_compile plugin.py` 验证语法
 2. 用 AST 检查确认 Tool/Command/HomeCard/路由注册无遗漏
-3. 用 ruff 查未定义名（`/root/mai/MaiBot-main/.venv/bin/ruff check --select F821 plugin.py core/*.py`）——**拆分/新增模块后必跑**，防止漏 import（曾因缺 hashlib/time/_split_txt 导致重建索引、批量导入、update_md5 运行时 NameError）
+3. 用 ruff 查未定义名（`/root/mai/MaiBot-main/.venv/bin/ruff check --select F821 plugin.py core/*.py`）——**拆分/新增模块后必跑**，防止漏 import（曾因缺 hashlib/time/_split_txt 导致重建索引、txt 批量写入、update_md5 运行时 NameError）
 4. 若改 `_compute_text_boost`，用独立脚本跑加分规则用例
 5. 若改 WebUI，用脚本检查 HTML div 配对、关键元素存在
 6. 若改配置模型，用 uv 虚拟环境（`MaiBot-main/.venv/bin/python`）跑 `generate_plugin_config_schema` 实测 label/hint/ui_type（见上文"验证 Schema"）

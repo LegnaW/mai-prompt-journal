@@ -80,9 +80,10 @@ class WebUIMixin:
             app.router.add_post("/api/backups/delete", self._web_backups_delete)
             app.router.add_get("/api/embedding_profile", self._web_embedding_profile_get)
             app.router.add_post("/api/embedding_profile", self._web_embedding_profile_save)
-            app.router.add_get("/api/export", self._web_export)
+            app.router.add_post("/api/export/start", self._web_export_start)
+            app.router.add_get("/api/export/download", self._web_export_download)
+            app.router.add_get("/api/transfer/state", self._web_transfer_state)
             app.router.add_post("/api/import/file", self._web_import_file)
-            app.router.add_get("/api/import/file_state", self._web_import_file_state)
             app.router.add_get("/api/import/file_preview", self._web_import_file_preview)
             app.router.add_post("/api/import/file_commit", self._web_import_file_commit)
 
@@ -1202,46 +1203,69 @@ class WebUIMixin:
         self.ctx.logger.info("已保存第三方 embedding 配置")
         return web.json_response({"success": True})
 
-    async def _web_export(self, request: Any) -> Any:
-        """导出笔记本：jsonl 或 mpj（直接 / 重新生成索引导出）。"""
+    async def _web_export_start(self, request: Any) -> Any:
+        """启动导出后台任务（jsonl / mpj 直接 / 重新生成索引导出）。"""
         from aiohttp import web
 
         if not self._web_check_auth(request):
             return web.json_response({"error": "unauthorized"}, status=401)
-        nb_name = str(request.query.get("notebook", "") or "").strip() or "default"
-        fmt = str(request.query.get("format", "") or "").strip() or "jsonl"
-        mode = str(request.query.get("mode", "") or "").strip() or "direct"
-        filename = str(request.query.get("filename", "") or "").strip()
+        body = await self._web_read_body(request)
+        nb_name = str(body.get("notebook", "") or "").strip() or "default"
+        fmt = str(body.get("format", "") or "").strip() or "jsonl"
+        mode = str(body.get("mode", "") or "").strip() or "direct"
+        filename = str(body.get("filename", "") or "").strip()
+        if "/" in filename or "\\" in filename or not filename:
+            filename = f"{nb_name}.{fmt}"
 
         nb = self._get_notebook(nb_name)
         if nb is None:
             return web.json_response({"error": f"笔记本 '{nb_name}' 不存在"}, status=404)
-        if not filename or "/" in filename or "\\" in filename:
-            filename = f"{nb_name}.{fmt}"
 
-        try:
-            if fmt == "jsonl":
-                data = await self._export_jsonl(nb)
-                ctype = "text/plain"
-            elif fmt == "mpj":
-                if mode == "rebuild":
-                    data = await self._export_mpj_rebuild(nb)
-                else:
-                    data = await self._export_mpj_direct(nb)
-                if not filename.endswith(".mpj"):
-                    filename = f"{nb_name}.mpj"
-                ctype = "application/zip"
-            else:
-                return web.json_response({"error": "format 只能是 jsonl 或 mpj"}, status=400)
-        except Exception as exc:
-            self.ctx.logger.warning(f"导出失败: {exc}")
-            return web.json_response({"error": str(exc)}, status=400)
+        task_id = self._start_task("export", "笔记本导出")
+        if task_id is None:
+            return web.json_response({"error": "已有后台任务进行中，请等待完成后再试"}, status=409)
+        self._reset_io()
+        self._set_io("export", "building")
+        handle = asyncio.create_task(self._run_export_task(task_id, nb_name, fmt, mode, filename))
+        if self._tasks.get(task_id) is not None:
+            self._tasks[task_id]["handle"] = handle
+        return web.json_response({"task_id": task_id, "kind": "export", "state": "building"})
 
+    async def _web_export_download(self, request: Any) -> Any:
+        """下载已完成的导出产物。"""
+        from aiohttp import web
+
+        if not self._web_check_auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        if self._get_io_kind() != "export" or self._get_io_state() != "done":
+            return web.json_response({"error": "当前没有可下载的导出"}, status=400)
+        result = self._read_io_result()
+        filename = str(result.get("filename", "") or "").strip()
+        path = self._artifact_path(filename)
+        if not path.exists():
+            return web.json_response({"error": "导出产物不存在"}, status=404)
+        ctype = result.get("ctype") or ("application/zip" if filename.endswith(".mpj") else "text/plain")
         return web.Response(
-            body=data,
+            body=path.read_bytes(),
             content_type=ctype,
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
+
+    async def _web_transfer_state(self, request: Any) -> Any:
+        """查询统一传输状态（导入/导出，抗刷新）。"""
+        from aiohttp import web
+
+        if not self._web_check_auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        kind = self._get_io_kind()
+        state = self._get_io_state()
+        resp: dict[str, Any] = {"kind": kind, "state": state}
+        if state == "ready":
+            meta, _entries = self._read_io_preview()
+            resp["preview"] = meta
+        elif state in ("done", "error"):
+            resp["result"] = self._read_io_result()
+        return web.json_response(resp)
 
     async def _web_import_file(self, request: Any) -> Any:
         """上传 jsonl/mpj 文件并启动后台校验任务。"""
@@ -1272,32 +1296,12 @@ class WebUIMixin:
         task_id = self._start_task("import_file", "笔记本导入校验")
         if task_id is None:
             return web.json_response({"error": "已有后台任务进行中，请等待完成后再试"}, status=409)
-        # 重置暂存区
-        import shutil
-
-        staging = self._file_import_dir()
-        if staging.exists():
-            shutil.rmtree(staging, ignore_errors=True)
-        self._set_file_state("validating")
+        self._reset_io()
+        self._set_io("import", "validating")
         handle = asyncio.create_task(self._run_file_validation_task(task_id, source, filename, sample_n))
         if self._tasks.get(task_id) is not None:
             self._tasks[task_id]["handle"] = handle
-        return web.json_response({"task_id": task_id, "state": "validating"})
-
-    async def _web_import_file_state(self, request: Any) -> Any:
-        """查询文件导入状态（抗刷新）。"""
-        from aiohttp import web
-
-        if not self._web_check_auth(request):
-            return web.json_response({"error": "unauthorized"}, status=401)
-        state = self._get_file_state()
-        resp: dict[str, Any] = {"state": state}
-        if state == "ready":
-            meta, _entries = self._read_file_preview()
-            resp["preview"] = meta
-        elif state in ("done", "error"):
-            resp["result"] = self._read_file_result()
-        return web.json_response(resp)
+        return web.json_response({"task_id": task_id, "kind": "import", "state": "validating"})
 
     async def _web_import_file_preview(self, request: Any) -> Any:
         """分页返回导入预览条目。"""
@@ -1305,11 +1309,11 @@ class WebUIMixin:
 
         if not self._web_check_auth(request):
             return web.json_response({"error": "unauthorized"}, status=401)
-        if self._get_file_state() != "ready":
+        if self._get_io_kind() != "import" or self._get_io_state() != "ready":
             return web.json_response({"error": "当前没有可预览的导入"}, status=400)
         page = max(1, int(request.query.get("page", 1)))
         size = max(1, min(200, int(request.query.get("size", 20))))
-        _meta, entries = self._read_file_preview()
+        _meta, entries = self._read_io_preview()
         total = len(entries)
         start = (page - 1) * size
         end = start + size
@@ -1329,8 +1333,7 @@ class WebUIMixin:
 
         if not self._web_check_auth(request):
             return web.json_response({"error": "unauthorized"}, status=401)
-        state = self._get_file_state()
-        if state != "ready":
+        if self._get_io_kind() != "import" or self._get_io_state() != "ready":
             return web.json_response({"error": "当前没有可提交的导入预览"}, status=400)
 
         body = await self._web_read_body(request)
@@ -1346,11 +1349,11 @@ class WebUIMixin:
         task_id = self._start_task("import_file_commit", "笔记本导入")
         if task_id is None:
             return web.json_response({"error": "已有后台任务进行中，请等待完成后再试"}, status=409)
-        self._set_file_state("importing")
+        self._set_io("import", "importing")
         handle = asyncio.create_task(self._run_file_commit_task(task_id, target_name, mode, merge_target))
         if self._tasks.get(task_id) is not None:
             self._tasks[task_id]["handle"] = handle
-        return web.json_response({"task_id": task_id, "state": "importing"})
+        return web.json_response({"task_id": task_id, "kind": "import", "state": "importing"})
 
     async def _web_organize_db_apply(self, request: Any) -> Any:
         """确认并执行 LLM 修改方案，重建索引。"""
