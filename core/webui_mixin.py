@@ -1199,6 +1199,11 @@ class WebUIMixin:
             profile["timeout"] = max(5, min(600, timeout))
         except (TypeError, ValueError):
             pass
+        try:
+            concurrent = int(body.get("concurrent", profile.get("concurrent", 4)) or 4)
+            profile["concurrent"] = max(1, min(16, concurrent))
+        except (TypeError, ValueError):
+            pass
         if not profile.get("base_url") or not profile.get("api_key") or not profile.get("model"):
             return web.json_response({"error": "base_url / api_key / model 均不能为空"}, status=400)
         save_embedding_profile(self._data_dir, profile)
@@ -1218,13 +1223,6 @@ class WebUIMixin:
         filename = str(body.get("filename", "") or "").strip()
         if "/" in filename or "\\" in filename or not filename:
             filename = f"{nb_name}.{fmt}"
-        concurrent = None
-        try:
-            raw_concurrent = int(body.get("concurrent") or 0)
-        except (TypeError, ValueError):
-            raw_concurrent = 0
-        if raw_concurrent:
-            concurrent = max(1, min(16, raw_concurrent))
 
         nb = self._get_notebook(nb_name)
         if nb is None:
@@ -1235,7 +1233,7 @@ class WebUIMixin:
             return web.json_response({"error": "已有后台任务进行中，请等待完成后再试"}, status=409)
         self._reset_io()
         self._set_io("export", "building")
-        handle = asyncio.create_task(self._run_export_task(task_id, nb_name, fmt, mode, filename, concurrent))
+        handle = asyncio.create_task(self._run_export_task(task_id, nb_name, fmt, mode, filename))
         if self._tasks.get(task_id) is not None:
             self._tasks[task_id]["handle"] = handle
         return web.json_response({"task_id": task_id, "kind": "export", "state": "building"})
@@ -1306,7 +1304,6 @@ class WebUIMixin:
         filename = ""
         source = b""
         sample_n = 25
-        concurrent = None
         reader = await request.multipart()
         while True:
             part = await reader.next()
@@ -1320,11 +1317,6 @@ class WebUIMixin:
                     sample_n = max(0, min(200, int((await part.read()).decode())))
                 except Exception:
                     pass
-            elif part.name == "concurrent":
-                try:
-                    concurrent = max(1, min(16, int((await part.read()).decode())))
-                except Exception:
-                    pass
         if not source or not filename:
             return web.json_response({"error": "未收到文件"}, status=400)
 
@@ -1332,7 +1324,6 @@ class WebUIMixin:
         if task_id is None:
             return web.json_response({"error": "已有后台任务进行中，请等待完成后再试"}, status=409)
         self._reset_io()
-        self._set_io_concurrent(concurrent)
         self._set_io("import", "validating")
         handle = asyncio.create_task(self._run_file_validation_task(task_id, source, filename, sample_n))
         if self._tasks.get(task_id) is not None:
