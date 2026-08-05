@@ -12,6 +12,7 @@
 写入 `artifact/`（jsonl 直接复制重命名，mpj 打包），完成后前端提供下载。
 """
 
+import asyncio
 import hashlib
 import io
 import json
@@ -143,21 +144,58 @@ class ExportImportMixin:
         except Exception:
             return {}
 
-    async def _embed_with_progress(self, texts: list[str], chunk: int = 8) -> np.ndarray | None:
-        """分批内置 embedding 并写进度到 file_io/progress.json，返回矩阵或 None。"""
+    async def _embed_with_progress(self, texts: list[str]) -> np.ndarray | None:
+        """内置 embedding 并发逐条生成并写进度。
+
+        并发数取页面配置（file_io/concurrent，无则用 config.journal.embed_max_concurrent），
+        每完成一条写一次进度，保证并发吞吐的同时进度平滑。
+        """
         total = len(texts)
         if total == 0:
             return None
-        vectors: list[np.ndarray] = []
-        for i in range(0, total, chunk):
-            emb = await self._embed_batch(texts[i : i + chunk])
-            if emb is None:
-                return None
-            vectors.append(emb)
-            self._write_io_progress(
-                {"phase": "embedding", "done": min(i + len(emb), total), "total": total}
-            )
-        return np.vstack(vectors) if vectors else None
+        concurrent = self._embed_concurrent()
+        sem = asyncio.Semaphore(concurrent)
+        vectors: list[np.ndarray | None] = [None] * total
+        done = 0
+
+        async def worker(i: int, text: str) -> None:
+            nonlocal done
+            async with sem:
+                vec = await self._embed_single(text)
+            vectors[i] = vec
+            done += 1
+            self._write_io_progress({"phase": "embedding", "done": done, "total": total})
+
+        await asyncio.gather(*(worker(i, t) for i, t in enumerate(texts)))
+        if any(v is None for v in vectors):
+            return None
+        return np.asarray([v for v in vectors if v is not None], dtype=np.float32)
+
+    def _embed_concurrent(self) -> int:
+        """当前 embedding 并发数：页面配置优先，否则 config.journal.embed_max_concurrent。"""
+        n = self._get_io_concurrent()
+        if n is None:
+            try:
+                n = int(getattr(self.config.journal, "embed_max_concurrent", 4))
+            except (TypeError, ValueError):
+                n = 4
+        return max(1, min(16, int(n or 4)))
+
+    def _io_concurrent_path(self) -> Path:
+        return self._io_dir() / "concurrent"
+
+    def _set_io_concurrent(self, n: int | None) -> None:
+        if n is None:
+            return
+        d = self._io_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        self._io_concurrent_path().write_text(str(int(n)), encoding="utf-8")
+
+    def _get_io_concurrent(self) -> int | None:
+        try:
+            return int(self._io_concurrent_path().read_text(encoding="utf-8").strip())
+        except Exception:
+            return None
 
     def _save_artifact(self, data: bytes, filename: str) -> None:
         d = self._io_artifact_dir()
@@ -229,7 +267,9 @@ class ExportImportMixin:
     # 导出（后台任务，产物写入 artifact/）
     # ============================================================
 
-    async def _run_export_task(self, task_id: str, notebook: str, fmt: str, mode: str, filename: str) -> None:
+    async def _run_export_task(
+        self, task_id: str, notebook: str, fmt: str, mode: str, filename: str, concurrent: int | None = None
+    ) -> None:
         try:
             nb = self._get_notebook(notebook)
             if nb is None:
@@ -243,7 +283,7 @@ class ExportImportMixin:
                 ctype = "text/plain"
             elif fmt == "mpj":
                 if mode == "rebuild":
-                    data = await self._export_mpj_rebuild(nb)
+                    data = await self._export_mpj_rebuild(nb, concurrent=concurrent)
                 else:
                     data = await self._export_mpj_direct(nb)
                 out_name = filename if filename.endswith(".mpj") else f"{filename or nb.name}.mpj"
@@ -279,8 +319,8 @@ class ExportImportMixin:
             raise RuntimeError("笔记本无索引，无法导出 mpj（请先重建索引）")
         return self._pack_mpj_bytes(files)
 
-    async def _export_mpj_rebuild(self, nb: Notebook) -> bytes:
-        """用第三方 embedding 重新生成索引导出。"""
+    async def _export_mpj_rebuild(self, nb: Notebook, concurrent: int | None = None) -> bytes:
+        """用第三方 embedding 重新生成索引导出（并发逐条 + 进度）。"""
         profile = load_embedding_profile(self._data_dir)
         client = EmbeddingClient(
             base_url=profile.get("base_url", ""),
@@ -295,15 +335,22 @@ class ExportImportMixin:
             raise RuntimeError("笔记本为空，无法导出")
         texts = [self._build_embedding_text(e["en"], e["zh"], e["note"]) for e in entries]
         total = len(texts)
-        vectors: list[list[float]] = []
-        for i in range(0, total, 8):
-            part = await client.embed(texts[i : i + 64])
-            if part is None:
-                raise RuntimeError("第三方 embedding 调用失败，请检查配置或网络")
-            vectors.extend(part)
-            self._write_io_progress({"phase": "embedding", "done": min(i + len(part), total), "total": total})
-        if len(vectors) != total:
-            raise RuntimeError("第三方 embedding 返回数量不匹配")
+        sem = asyncio.Semaphore(max(1, min(16, int(concurrent or self._embed_concurrent() or 4))))
+        vectors: list[list[float] | None] = [None] * total
+        done = 0
+
+        async def worker(i: int, text: str) -> None:
+            nonlocal done
+            async with sem:
+                res = await client.embed([text])
+            if res and len(res) == 1:
+                vectors[i] = res[0]
+            done += 1
+            self._write_io_progress({"phase": "embedding", "done": done, "total": total})
+
+        await asyncio.gather(*(worker(i, t) for i, t in enumerate(texts)))
+        if any(v is None for v in vectors):
+            raise RuntimeError("第三方 embedding 调用失败，请检查配置或网络")
 
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)

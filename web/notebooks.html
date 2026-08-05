@@ -62,6 +62,8 @@
             <label>抽样条数</label>
             <input type="number" id="importSample" value="25" min="0" max="200" style="width:80px;">
             <span style="font-size:12px;color:#999;">填 0 表示不校验相似度</span>
+            <label>embedding 并发数</label>
+            <input type="number" id="importConcurrent" value="4" min="1" max="16" style="width:70px;">
             <button class="btn btn-success" onclick="uploadFile()">上传并校验</button>
           </div>
         </div>
@@ -87,6 +89,8 @@
           <div class="row" style="margin-bottom:6px;gap:8px;flex-wrap:wrap;">
             <label>文件名</label>
             <input type="text" id="exportFilename" style="flex:1;min-width:140px;">
+            <label>embedding 并发数</label>
+            <input type="number" id="exportConcurrent" value="4" min="1" max="16" style="width:70px;">
             <button class="btn" onclick="doExport()">开始导出</button>
           </div>
           <div class="hidden" id="embeddingConfigRow" style="margin-top:8px;padding:12px;background:#f8f9fa;border-radius:8px;">
@@ -299,6 +303,7 @@ function doExport() {
     format: document.getElementById('exportFormat').value,
     mode: document.getElementById('exportFormat').value === 'mpj' ? document.getElementById('exportMode').value : 'direct',
     filename: document.getElementById('exportFilename').value.trim(),
+    concurrent: parseInt(document.getElementById('exportConcurrent').value || '4', 10),
   };
   api('POST', '/api/export/start', body).then(data => {
     if (data.error) { alert(data.error); return; }
@@ -420,9 +425,11 @@ function uploadFile() {
   const file = fileInput.files && fileInput.files[0];
   if (!file) { alert('请先选择文件'); return; }
   const sample = parseInt(document.getElementById('importSample').value || '25', 10);
+  const concurrent = parseInt(document.getElementById('importConcurrent').value || '4', 10);
   const fd = new FormData();
   fd.append('file', file);
   fd.append('sample', String(sample));
+  fd.append('concurrent', String(concurrent));
   fetch('/api/import/file', { method: 'POST', body: fd, cache: 'no-store' }).then(r => r.json()).then(data => {
     if (data.error) { alert(data.error); return; }
     showTransferBody();
