@@ -93,12 +93,14 @@ let previewEntries = [];
 let previewPage = 1;
 const PREVIEW_PAGE_SIZE = 20;
 let fileStateTimer = null;
+let allNotebooks = [];
 
 function loadNotebooks() {
   const div = document.getElementById('notebookList');
   div.innerHTML = '<p style="color:#999">加载中...</p>';
   api('GET', '/api/status').then(data => {
     const notebooks = data.notebooks || [];
+    allNotebooks = notebooks;
     if (notebooks.length === 0) {
       div.innerHTML = '<p style="color:#999">暂无笔记本</p>';
     } else {
@@ -123,9 +125,16 @@ function populateSelects(notebooks) {
   const cur = exp.value || 'default';
   exp.innerHTML = notebooks.map(n => `<option value="${esc(n.name)}">${esc(n.name)}</option>`).join('') || '<option value="default">default</option>';
   exp.value = cur;
-  const merge = document.getElementById('importMergeTarget');
-  merge.innerHTML = '<option value="">（新建笔记本）</option>' + notebooks.map(n => `<option value="${esc(n.name)}">${esc(n.name)}</option>`).join('');
+  populateMergeOptions(notebooks);
   onExportChange();
+}
+
+function populateMergeOptions(notebooks) {
+  const merge = document.getElementById('importMergeTarget');
+  if (!merge) return;
+  const cur = merge.value || '';
+  merge.innerHTML = '<option value="">（新建笔记本）</option>' + notebooks.map(n => `<option value="${esc(n.name)}">${esc(n.name)}</option>`).join('');
+  merge.value = cur;
 }
 
 function onExportChange() {
@@ -303,6 +312,7 @@ function renderImportPreview() {
   <div id="previewEntries" style="margin-top:12px;"></div>`;
   body.innerHTML = html;
 
+  populateMergeOptions(allNotebooks);
   onTargetTypeChange();
   loadPreviewPage(1);
   updateCommitEnable();
