@@ -32,7 +32,7 @@
       <strong>上传 / 下载笔记本</strong>
     </div>
     <div style="font-size:12px;color:#999;margin-bottom:12px;line-height:1.7;">
-      支持 jsonl（仅笔记数据）与 mpj（zip：笔记 + 索引 + 校验码，不含缓存）两种格式。上传 mpj 会校验完整性并抽样检查索引；校验 / 导入均为后台任务，页面刷新不丢进度。
+      支持 jsonl（仅笔记数据）与 mpj（笔记 + 索引 + 校验码）两种格式。上传 mpj 会校验完整性并抽样检查索引；校验 / 导入均为后台任务，页面刷新不丢进度。
     </div>
 
     <div class="row" style="margin-bottom:6px;gap:8px;flex-wrap:wrap;align-items:center;">
@@ -42,7 +42,7 @@
       <label>格式</label>
       <select id="exportFormat" onchange="onExportChange()">
         <option value="jsonl">jsonl</option>
-        <option value="mpj">mpj（zip）</option>
+        <option value="mpj">mpj</option>
       </select>
       <label>文件名</label>
       <input type="text" id="exportFilename" style="flex:1;min-width:140px;">
