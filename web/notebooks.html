@@ -329,6 +329,28 @@ function stopTransferPolling() {
   if (transferTimer) { clearInterval(transferTimer); transferTimer = null; }
 }
 
+function transferBusyHtml(progress, label) {
+  const p = progress || {};
+  const done = p.done || 0, total = p.total || 0;
+  const pct = total > 0 ? Math.round(done / total * 100) : 0;
+  return `<div style="line-height:1.7;">
+    <p>${label}${total > 0 ? `（${done}/${total}）` : ''}</p>
+    ${total > 0 ? `<div style="background:#eee;border-radius:4px;height:10px;margin:6px 0;">
+      <div style="background:#4f9afe;height:10px;border-radius:4px;width:${pct}%;transition:width .3s;"></div>
+    </div>` : '<div style="background:#eee;border-radius:4px;height:10px;margin:6px 0;overflow:hidden;"><div style="background:#4f9afe;height:10px;width:40%;animation:mpj-busy 1.2s ease-in-out infinite;"></div></div>'}
+    <button class="btn btn-outline btn-sm" onclick="cancelTransfer()">取消</button>
+  </div>`;
+}
+
+function cancelTransfer() {
+  api('POST', '/api/transfer/cancel', {}).then(data => {
+    window.__previewMeta = null;
+    stopTransferPolling();
+    hideTransferBody();
+    document.getElementById('transferStatus').innerHTML = '';
+  }).catch(() => {});
+}
+
 function pollTransferState() {
   api('GET', '/api/transfer/state').then(data => {
     const status = document.getElementById('transferStatus');
@@ -340,13 +362,13 @@ function pollTransferState() {
     }
     showTransferBody();
     if (data.kind === 'import') {
-      if (data.state === 'validating') status.innerHTML = '<p>正在校验文件...</p>';
-      else if (data.state === 'importing') status.innerHTML = '<p>正在导入...</p>';
+      if (data.state === 'validating') status.innerHTML = transferBusyHtml(data.progress, '正在校验文件...');
+      else if (data.state === 'importing') status.innerHTML = transferBusyHtml(data.progress, '正在导入（生成索引）...');
       else if (data.state === 'ready') { stopTransferPolling(); renderImportPreview(data.preview || {}); }
       else if (data.state === 'done') { stopTransferPolling(); renderTransferResult(data.result || {}); loadNotebooks(); loadStatus(); }
       else if (data.state === 'error') { stopTransferPolling(); renderTransferResult(data.result || { error: '校验或导入失败' }); }
     } else if (data.kind === 'export') {
-      if (data.state === 'building') status.innerHTML = '<p>正在生成导出...</p>';
+      if (data.state === 'building') status.innerHTML = transferBusyHtml(data.progress, '正在生成导出...');
       else if (data.state === 'done') { stopTransferPolling(); renderTransferResult(data.result || {}); }
       else if (data.state === 'error') { stopTransferPolling(); renderTransferResult(data.result || { error: '导出失败' }); }
     }

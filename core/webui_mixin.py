@@ -84,6 +84,7 @@ class WebUIMixin:
             app.router.add_get("/api/export/download", self._web_export_download)
             app.router.add_get("/api/transfer/state", self._web_transfer_state)
             app.router.add_post("/api/transfer/clear", self._web_transfer_clear)
+            app.router.add_post("/api/transfer/cancel", self._web_transfer_cancel)
             app.router.add_post("/api/import/file", self._web_import_file)
             app.router.add_get("/api/import/file_preview", self._web_import_file_preview)
             app.router.add_post("/api/import/file_commit", self._web_import_file_commit)
@@ -1261,6 +1262,7 @@ class WebUIMixin:
         kind = self._get_io_kind()
         state = self._get_io_state()
         resp: dict[str, Any] = {"kind": kind, "state": state}
+        resp["progress"] = self._read_io_progress() or None
         if state == "ready":
             meta, _entries = self._read_io_preview()
             resp["preview"] = meta
@@ -1276,6 +1278,16 @@ class WebUIMixin:
             return web.json_response({"error": "unauthorized"}, status=401)
         self._reset_io()
         return web.json_response({"success": True, "state": "none"})
+
+    async def _web_transfer_cancel(self, request: Any) -> Any:
+        """取消进行中的导入/导出后台任务并清空状态。"""
+        from aiohttp import web
+
+        if not self._web_check_auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        cancelled = self._cancel_running_task()
+        self._reset_io()
+        return web.json_response({"success": True, "cancelled": cancelled, "state": "none"})
 
     async def _web_import_file(self, request: Any) -> Any:
         """上传 jsonl/mpj 文件并启动后台校验任务。"""

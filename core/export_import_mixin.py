@@ -59,6 +59,9 @@ class ExportImportMixin:
     def _io_result_path(self) -> Path:
         return self._io_dir() / "result.json"
 
+    def _io_progress_path(self) -> Path:
+        return self._io_dir() / "progress.json"
+
     def _io_artifact_dir(self) -> Path:
         return self._io_dir() / "artifact"
 
@@ -127,6 +130,34 @@ class ExportImportMixin:
             return data if isinstance(data, dict) else {}
         except Exception:
             return {}
+
+    def _write_io_progress(self, progress: dict[str, Any]) -> None:
+        d = self._io_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        self._io_progress_path().write_text(json.dumps(progress, ensure_ascii=False), encoding="utf-8")
+
+    def _read_io_progress(self) -> dict[str, Any]:
+        try:
+            data = json.loads(self._io_progress_path().read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    async def _embed_with_progress(self, texts: list[str], chunk: int = 64) -> np.ndarray | None:
+        """分批内置 embedding 并写进度到 file_io/progress.json，返回矩阵或 None。"""
+        total = len(texts)
+        if total == 0:
+            return None
+        vectors: list[np.ndarray] = []
+        for i in range(0, total, chunk):
+            emb = await self._embed_batch(texts[i : i + chunk])
+            if emb is None:
+                return None
+            vectors.append(emb)
+            self._write_io_progress(
+                {"phase": "embedding", "done": min(i + len(emb), total), "total": total}
+            )
+        return np.vstack(vectors) if vectors else None
 
     def _save_artifact(self, data: bytes, filename: str) -> None:
         d = self._io_artifact_dir()
@@ -263,9 +294,16 @@ class ExportImportMixin:
         if not entries:
             raise RuntimeError("笔记本为空，无法导出")
         texts = [self._build_embedding_text(e["en"], e["zh"], e["note"]) for e in entries]
-        vectors = await client.embed(texts)
-        if vectors is None:
-            raise RuntimeError("第三方 embedding 调用失败，请检查配置或网络")
+        total = len(texts)
+        vectors: list[list[float]] = []
+        for i in range(0, total, 64):
+            part = await client.embed(texts[i : i + 64])
+            if part is None:
+                raise RuntimeError("第三方 embedding 调用失败，请检查配置或网络")
+            vectors.extend(part)
+            self._write_io_progress({"phase": "embedding", "done": min(i + len(part), total), "total": total})
+        if len(vectors) != total:
+            raise RuntimeError("第三方 embedding 返回数量不匹配")
 
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
@@ -390,9 +428,10 @@ class ExportImportMixin:
             norms = np.linalg.norm(emb_f32, axis=1)
             safe = np.where(norms > 1e-8, norms, 1.0)
             scores: list[float] = []
-            for i in idxs:
+            for done, i in enumerate(idxs, 1):
                 text = self._build_embedding_text(entries[i]["en"], entries[i]["zh"], entries[i]["note"])
                 vec = await self._embed_single(text)
+                self._write_io_progress({"phase": "校验抽样", "done": done, "total": n})
                 if vec is None:
                     continue
                 vn = float(np.linalg.norm(vec))
@@ -466,7 +505,7 @@ class ExportImportMixin:
                         e["id"] = scramble_id(base + i * 1000 + len(existing_ids))
                     existing_ids.add(e["id"])
                 texts = [self._build_embedding_text(e["en"], e["zh"], e["note"]) for e in fresh]
-                emb = await self._embed_batch(texts)
+                emb = await self._embed_with_progress(texts)
                 if emb is None:
                     return False, "embedding 服务不可用"
                 nb.append_entries(fresh, emb)
@@ -481,7 +520,7 @@ class ExportImportMixin:
             if self._get_notebook(name) is not None:
                 return False, f"笔记本 '{name}' 已存在"
             texts = [self._build_embedding_text(e["en"], e["zh"], e["note"]) for e in entries]
-            emb = await self._embed_batch(texts)
+            emb = await self._embed_with_progress(texts)
             if emb is None:
                 return False, "embedding 服务不可用"
             nb = Notebook(name, self._data_dir)
