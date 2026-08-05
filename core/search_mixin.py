@@ -1,5 +1,6 @@
 """向量搜索、索引重建与 embedding 助手（mixin）。"""
 
+import hashlib
 import time
 from typing import Any
 

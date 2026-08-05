@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 
 from .constants import _DEDUP_SCAN_BLOCK, _WEBUI_SESSION_TTL, _WEBUI_WARNING_HTML, _WEB_DIR
-from .notebook import Notebook, scramble_id
+from .notebook import Notebook, _split_txt, scramble_id
 
 class WebUIMixin:
 

@@ -7,10 +7,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Mapping
+
+import numpy as np
 
 from maibot_sdk import (
     CONFIG_RELOAD_SCOPE_SELF,
