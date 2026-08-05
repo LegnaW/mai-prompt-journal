@@ -479,7 +479,7 @@ function renderImportPreview(meta) {
         `<span${lowSim ? ' style="color:#c62828;font-weight:bold;"' : ''}>平均 ${meta.sample.avg}　最小 ${meta.sample.min}</span></p>`;
       if (lowSim) {
         html += `<div style="margin:6px 0;padding:8px 10px;background:#fdecea;border:1px solid #f5c6c6;border-radius:8px;font-size:13px;color:#b71c1c;line-height:1.7;">
-          抽样相似度最低值低于 0.95，mpj 中的向量与笔记内容可能存在不一致（可能被第三方修改，或生成向量所用模型不同），导入前请务必核对。
+          抽样相似度最低值低于 0.95，你的 embedding 极可能和文件导出者用的不一致，请重建索引导入。
         </div>`;
       }
     } else {

@@ -32,7 +32,7 @@
 - **第三方 embedding 配置新增「向量维度」**：`embedding_profile.json` 新增可选 `dim` 字段（WebUI 表单 `embDim` 输入并自动预填）；后端 `_web_embedding_profile_save` 支持存取；`_export_mpj_rebuild` 导出时若配置了 `dim` 会逐条核对第三方返回的向量维度，不符即报错中止，防止导出损坏的 mpj（`core/export_import_mixin.py`）。
 - **导出前自动保存第三方配置**：`doExport` 在 mpj + rebuild 模式点击「开始导出」时先静默保存当前表单配置（`saveEmbeddingProfile(true)`）再启动导出，避免用旧配置导出；direct 模式不依赖该配置不触发。
 - **api_key 保留语义**：placeholder 标注「留空则保留已保存的密钥」；GET 端点不回传 api_key、前端表单恒为空，后端仅当提交值非空时才覆盖 `profile["api_key"]`。
-- **导入校验相似度警告**：抽样最小相似度 < 0.95 时，`renderImportPreview` 将数值红色加粗并追加红底提示「向量与内容可能存在不一致」，提醒导入前核对（阈值 0.95 仅前端）。
+- **导入校验相似度警告**：抽样最小相似度 < 0.95 时，`renderImportPreview` 将数值红色加粗并追加红底提示「你的 embedding 极可能和文件导出者用的不一致，请重建索引导入」（阈值 0.95 仅前端）。
 - **导入/导出列位置交换**：「导入 / 导出」选项卡现为**左导出、右导入**（此前左导入右导出）。
 - **导出说明文案更新**：明确 jsonl 仅为数据记录（无索引、重导需重算）、mpj 为本插件专用格式（打包索引，同 embedding 模型可直接导入），以及两种导出模式的用途。
 - **直接导入按钮仅 mpj 显示**：jsonl 预览不再显示「直接导入」按钮（此前空按钮出现在 jsonl 预览中）。
@@ -250,7 +250,7 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 - `POST /api/import/file`（multipart：`file` + `sample` 抽样数）→ `_reset_io()` → `kind=import, state=validating` → 起后台校验任务。
 - 校验：jsonl 解析（`_parse_import_jsonl`：缺 id 补 `scramble_id`、缺 ts 补当前时间、坏行计入 skipped）；mpj 解包 → 校验码 → 维度（内置 embedding 探针）→ 条目数=向量数 → 维度一致时抽样（默认 25，前端可指定；**填 0 表示不校验相似度**，`meta.sample.skipped=true`，预览显示"未校验"）用内置 embedding 重算余弦 → 平均/最小相似度。结果写 `preview.jsonl` + `preview.json`，`state=ready`。
 - **校验码**：`checksum.sha256` 缺失或对不上都视为"可能被第三方修改"，前端显示警告并要求勾选"我已了解风险"才能提交（同一警告文案）。
-- **抽样相似度警告**：`renderImportPreview` 中抽样**最小相似度 < 0.95** 时数值红色加粗，并追加红底提示「向量与内容可能存在不一致」（可能被第三方修改或所用模型不同），提醒导入前核对（阈值仅前端）。
+- **抽样相似度警告**：`renderImportPreview` 中抽样**最小相似度 < 0.95** 时数值红色加粗，并追加红底提示「你的 embedding 极可能和文件导出者用的不一致，请重建索引导入」（阈值仅前端）。
 - 预览：新笔记本名称**默认取上传文件名**（去扩展名，输入框在预览面板）；目标（新建/合并）+ 按钮 **直接导入（仅 mpj 且维度/数量一致时显示）/ 重建索引导入 / 清除**（校验码异常需勾选"我已了解风险"才可点导入）。
 - 提交：jsonl / mpj-rebuild → 内置 embedding 全量建索引 → **新建或合并**（合并时重生成 id 防冲突，前端提醒去重）；mpj-direct → 保留 mpj 自带索引（仅新建，需维度一致 + 条目数=向量数）。
 - **进度与取消**：`file_io/progress.json` 由 `_write_io_progress` 写入（phase/done/total；导入用 `_embed_with_progress` 信号量并发逐条 embed，并发取 `config.journal.embed_max_concurrent`；mpj 校验抽样逐条）；前端状态元素显示 `(xx/xx)` + **取消按钮**（`POST /api/transfer/cancel` → `_cancel_running_task()` + `_reset_io()`）。
