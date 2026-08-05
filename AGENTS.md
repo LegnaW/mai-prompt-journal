@@ -30,7 +30,13 @@
 | 文件 | 职责 |
 |------|------|
 | `_manifest.json` | 插件元信息 + 能力声明 + 依赖声明 |
-| `plugin.py` | 全部业务逻辑（~3100 行） |
+| `plugin.py` | 入口：插件主类 `PromptJournalPlugin`（生命周期 / 迁移 / 4 工具 / 9 指令 / 辅助）+ `create_plugin()` 工厂 |
+| `core/constants.py` | 模块常量：LLM 系统提示词、`_WRITE_TOOL_NAMES`、WebUI 阈值与警告页等 |
+| `core/config.py` | 全部配置模型（`PromptJournalConfig` 及各节） |
+| `core/notebook.py` | `Notebook` 数据模型 + `scramble_id` / `_split_txt` |
+| `core/search_mixin.py` | `SearchMixin`：向量搜索、索引重建、embedding 助手、写入去重检测 |
+| `core/organize_mixin.py` | `OrganizeMixin`：LLM 直连、去重整理、操作数据库、批量导入的 agent 循环 |
+| `core/webui_mixin.py` | `WebUIMixin`：WebUI 服务器 + 全部 API + 后台任务中心 + 去重扫描 |
 | `web/index.html` | WebUI 首页（状态栏 + 搜索/浏览 + 添加） |
 | `web/dedup.html` | WebUI 去重页 |
 | `web/organize.html` | WebUI 操作数据库页 |
@@ -39,6 +45,8 @@
 | `web/app.js` | WebUI 共享逻辑（api/esc/登录/loadStatus/导航注入 + 全局导航右侧的刷新/重建索引/全量重构索引按钮） |
 | `web/style.css` | WebUI 共享样式 |
 | `config.toml` | 运行时配置 |
+
+**架构说明**：主类 `PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin)` 通过 mixin 拆分业务，SDK 用 `dir(instance)` 收集组件，继承方法可正常注册。加载器以 `plugin.py` 为入口（`submodule_search_locations`），`core/` 下用**相对导入**（`from .core.config import ...`，与 maimai-drawpic-plugin 同款）。新增逻辑时：配置字段加在 `core/config.py`，通用工具/存储放 `core/notebook.py` 或新增 `core/*.py`，WebUI 处理器加进 `WebUIMixin`，agent 循环加进 `OrganizeMixin`，搜索相关加进 `SearchMixin`。
 
 WebUI 为多页面静态站点（无构建步骤）：`/` 返回 `web/index.html`，`/web/` 目录由 `_run_web_server` 中 `app.router.add_static("/web/", web_dir)` 提供服务。新增功能页 = 新建 `web/*.html` + 在 `app.js` 的 `NAV_ITEMS` 加导航项，并在页面底部调用 `injectNav('<id>')` + `loadStatus()`。
 
