@@ -377,6 +377,28 @@ function cancelTransfer() {
   }).catch(() => {});
 }
 
+function resumeTransfer() {
+  api('POST', '/api/transfer/resume', {}).then(data => {
+    if (data.error) { alert(data.error); return; }
+    showTransferBody();
+    startTransferPolling();
+  }).catch(() => {});
+}
+
+function renderInterruptedTransfer(data) {
+  const p = data.progress || {};
+  const done = p.done || 0, total = p.total || 0;
+  const resumeDone = data.resume_done || 0;
+  return `<div style="line-height:1.7;">
+    <p style="color:#e65100;"><strong>已中断</strong>：embedding 调用失败（已完成 ${done}/${total}，进度已缓存）</p>
+    <p style="color:#666;font-size:12px;">${resumeDone} 条已缓存到磁盘，选择「再次尝试」将从断点继续、不会重复处理已完成条目；「取消」将清空本次传输。</p>
+    <div class="row" style="margin-top:8px;">
+      <button class="btn btn-sm" onclick="resumeTransfer()">再次尝试</button>
+      <button class="btn btn-danger btn-sm" onclick="cancelTransfer()">取消</button>
+    </div>
+  </div>`;
+}
+
 function pollTransferState() {
   api('GET', '/api/transfer/state').then(data => {
     const status = document.getElementById('transferStatus');
@@ -387,7 +409,10 @@ function pollTransferState() {
       return;
     }
     showTransferBody();
-    if (data.kind === 'import') {
+    if (data.state === 'interrupted') {
+      status.innerHTML = renderInterruptedTransfer(data);
+      startTransferPolling();
+    } else if (data.kind === 'import') {
       if (data.state === 'validating') status.innerHTML = transferBusyHtml(data.progress, '正在校验文件...');
       else if (data.state === 'importing') status.innerHTML = transferBusyHtml(data.progress, '正在导入（生成索引）...');
       else if (data.state === 'ready') { stopTransferPolling(); renderImportPreview(data.preview || {}); }

@@ -127,6 +127,9 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin, 
         # 发现笔记本
         self._notebooks = self._discover_notebooks()
 
+        # 从磁盘恢复被中断的长程任务（断点续跑）
+        self._restore_interrupted_tasks()
+
         notebook_names = ", ".join(sorted(self._notebooks.keys())) or "(无)"
         self.ctx.logger.info(f"麦麦的绘图笔记本已加载，发现笔记本: {notebook_names}")
 

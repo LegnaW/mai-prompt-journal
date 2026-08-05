@@ -28,6 +28,17 @@ import numpy as np
 from .embedding_client import EmbeddingClient, load_embedding_profile
 from .mpj import pack_mpj, unpack_mpj
 from .notebook import Notebook, scramble_id
+from .resume import (
+    STATE_INTERRUPTED,
+    _PROGRESS_FLUSH_INTERVAL,
+    _RESUME_FILE,
+    TaskInterrupted,
+    clear_embed_progress,
+    load_embed_progress,
+    save_embed_progress,
+    save_json,
+)
+from .retry import run_task_item
 
 # 内置 embedding 的默认抽样条数（mpj 校验用）
 _DEFAULT_VALIDATE_SAMPLE = 25
@@ -144,32 +155,179 @@ class ExportImportMixin:
         except Exception:
             return {}
 
-    async def _embed_with_progress(self, texts: list[str]) -> np.ndarray | None:
-        """内置 embedding 并发逐条生成并写进度。
+    def _progress_flusher(
+        self,
+        done: set[int],
+        vectors: list[np.ndarray | None],
+        base_dir: Path | None,
+        interval: float = _PROGRESS_FLUSH_INTERVAL,
+    ) -> Any:
+        """返回周期落盘协程：每 interval 秒把 done 索引 + 向量写入 base_dir。
 
-        并发数取 config.journal.embed_max_concurrent，每完成一条写一次进度，
-        保证并发吞吐的同时进度平滑。
+        done/vectors 由 embed worker 协程共享；单线程事件循环内快照天然一致
+        （done.add(i) 发生在 vectors[i]=vec 之后），最多滞后一个 interval。
+        进程被强杀/断电时，磁盘上最多丢最后 interval 秒的进度。
+        """
+        async def _flush_loop() -> None:
+            while True:
+                await asyncio.sleep(interval)
+                if base_dir is None:
+                    continue
+                done_idx = sorted(done)
+                if not done_idx:
+                    continue
+                vecs = np.asarray([vectors[i] for i in done_idx], dtype=np.float32)
+                save_embed_progress(base_dir, done_idx, vecs)
+
+        return _flush_loop
+
+    async def _run_with_periodic_flush(
+        self,
+        coros: list[Any],
+        done: set[int],
+        vectors: list[np.ndarray | None],
+        base_dir: Path | None,
+        interval: float = _PROGRESS_FLUSH_INTERVAL,
+    ) -> None:
+        """并发运行 coros，同时周期落盘进度；结束后取消落盘协程。"""
+        flusher = asyncio.create_task(self._progress_flusher(done, vectors, base_dir, interval)())
+        try:
+            await asyncio.gather(*coros)
+        finally:
+            flusher.cancel()
+            try:
+                await flusher
+            except asyncio.CancelledError:
+                pass
+
+    def _write_resume_context(self, kind: str, resume_data: dict[str, Any]) -> None:
+        """把续跑上下文写入 file_io/resume.json（kind + 任务参数）。
+
+        任务启动即写一次：即使进程被强杀/断电，磁盘上也有任务参数可续跑；
+        中断时 `_interrupt_file_io` 复用同一函数覆盖写入。
+        """
+        d = self._io_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        resume = dict(resume_data)
+        resume["kind"] = kind
+        resume["state"] = STATE_INTERRUPTED
+        save_json(d / _RESUME_FILE, resume)
+
+    def _clear_resume_context(self) -> None:
+        """删除续跑上下文（任务成功完成后调用）。"""
+        p = self._io_dir() / _RESUME_FILE
+        if p.exists():
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+    def _file_io_retry_cfg(self) -> tuple[int, str]:
+        """读取 [file_io] 的重试配置：返回 (max_retries, on_failure)。"""
+        cfg = self.config.file_io
+        max_retries = int(getattr(cfg, "max_retries", 3) or 0)
+        on_failure = str(getattr(cfg, "on_failure", "interrupt") or "interrupt")
+        if on_failure not in ("interrupt", "skip"):
+            on_failure = "interrupt"
+        return max_retries, on_failure
+
+    def _load_io_resume_emb(self) -> tuple[set[int], np.ndarray]:
+        """读取 file_io 下缓存的已完成条目 embedding，返回 (索引集合, 向量矩阵)。"""
+        return load_embed_progress(self._io_dir())
+
+    def _interrupt_file_io(self, kind: str, resume_data: dict[str, Any]) -> None:
+        """把传输状态置为『中断』并缓存续跑上下文。
+
+        kind: "import_commit" | "export_mpj"。resume_data 为任务上下文
+        （导入的目标/模式，或导出的笔记本/格式），与 partial_emb 一起供再次尝试使用。
+        """
+        self._write_resume_context(kind, resume_data)
+        self._set_io("import" if kind == "import_commit" else "export", STATE_INTERRUPTED)
+
+    async def _embed_with_progress(
+        self,
+        texts: list[str],
+        max_retries: int = 3,
+        on_failure: str = "interrupt",
+        base_dir: Path | None = None,
+        resume_indices: set[int] | None = None,
+        resume_vectors: np.ndarray | None = None,
+    ) -> tuple[list[np.ndarray | None], list[int]]:
+        """内置 embedding 并发逐条生成并写进度，支持条目级重试 + 中断/跳过 + 断点续跑。
+
+        - 每条失败按 run_task_item 重试 max_retries 次；
+        - 仍失败：on_failure=="skip" 跳过（向量留 None，索引进 skipped）；
+          on_failure=="interrupt" 把已完成进度缓存到 base_dir 并抛 TaskInterrupted；
+        - resume_indices/resume_vectors 为磁盘缓存，已完成的条目不重复 embed。
+
+        返回 (vectors, skipped_indices)。vectors[i]=None 表示该条目被跳过。
         """
         total = len(texts)
         if total == 0:
-            return None
+            return [], []
         concurrent = max(1, min(16, int(getattr(self.config.journal, "embed_max_concurrent", 4))))
         sem = asyncio.Semaphore(concurrent)
+
         vectors: list[np.ndarray | None] = [None] * total
-        done = 0
+        done: set[int] = set(int(i) for i in (resume_indices or ()))
+        if resume_indices and resume_vectors is not None:
+            order = sorted(int(i) for i in resume_indices)
+            for i, v in zip(order, resume_vectors):
+                if 0 <= i < total:
+                    vectors[i] = v
+        skipped: list[int] = []
+        interrupt_error: str | None = None
+        interrupt_lock = asyncio.Lock()
 
-        async def worker(i: int, text: str) -> None:
-            nonlocal done
+        async def worker(i: int) -> None:
+            nonlocal interrupt_error
+            if vectors[i] is not None or interrupt_error is not None:
+                return
             async with sem:
-                vec = await self._embed_single(text)
-            vectors[i] = vec
-            done += 1
-            self._write_io_progress({"phase": "embedding", "done": done, "total": total})
+                if interrupt_error is not None:
+                    return
 
-        await asyncio.gather(*(worker(i, t) for i, t in enumerate(texts)))
-        if any(v is None for v in vectors):
-            return None
-        return np.asarray([v for v in vectors if v is not None], dtype=np.float32)
+                async def _single() -> tuple[np.ndarray | None, str | None]:
+                    vec = await self._embed_single(texts[i])
+                    if vec is None:
+                        return None, f"条目 {i + 1}/{total} embedding 失败"
+                    return vec, None
+
+                vec, error = await run_task_item(
+                    _single,
+                    max_retries,
+                    label=f"导入条目 {i + 1}/{total}",
+                    logger=self.ctx.logger,
+                )
+            if error is None and vec is not None:
+                vectors[i] = vec
+                done.add(i)
+            elif on_failure == "skip":
+                skipped.append(i)
+            else:
+                async with interrupt_lock:
+                    if interrupt_error is None:
+                        interrupt_error = error or "embedding 失败"
+            if interrupt_error is None:
+                self._write_io_progress({"phase": "embedding", "done": len(done), "total": total})
+
+        await self._run_with_periodic_flush(
+            [worker(i) for i in range(total)], done, vectors, base_dir
+        )
+
+        if interrupt_error is not None:
+            if base_dir is not None:
+                done_idx = sorted(done)
+                if done_idx:
+                    done_vecs = np.asarray([vectors[i] for i in done_idx], dtype=np.float32)
+                else:
+                    done_vecs = np.zeros((0, 0), dtype=np.float32)
+                save_embed_progress(base_dir, done_idx, done_vecs)
+            raise TaskInterrupted(interrupt_error)
+
+        if base_dir is not None:
+            clear_embed_progress(base_dir)
+        return vectors, skipped
 
     def _save_artifact(self, data: bytes, filename: str) -> None:
         d = self._io_artifact_dir()
@@ -241,12 +399,21 @@ class ExportImportMixin:
     # 导出（后台任务，产物写入 artifact/）
     # ============================================================
 
-    async def _run_export_task(self, task_id: str, notebook: str, fmt: str, mode: str, filename: str) -> None:
+    async def _run_export_task(
+        self,
+        task_id: str,
+        notebook: str,
+        fmt: str,
+        mode: str,
+        filename: str,
+        resume_ctx: dict[str, Any] | None = None,
+    ) -> None:
         try:
             nb = self._get_notebook(notebook)
             if nb is None:
                 raise RuntimeError(f"笔记本 '{notebook}' 不存在")
 
+            dropped = 0
             if fmt == "jsonl":
                 if not nb.notes_path.exists():
                     raise RuntimeError("笔记本无源文件")
@@ -255,7 +422,23 @@ class ExportImportMixin:
                 ctype = "text/plain"
             elif fmt == "mpj":
                 if mode == "rebuild":
-                    data = await self._export_mpj_rebuild(nb)
+                    # 启动即写续跑上下文：进程被强杀/断电时磁盘上也有任务参数可续跑
+                    self._write_resume_context(
+                        "export_mpj",
+                        {"notebook": notebook, "format": fmt, "mode": mode, "filename": filename},
+                    )
+                    max_retries, on_failure = self._file_io_retry_cfg()
+                    resume_indices: set[int] | None = None
+                    resume_vectors: np.ndarray | None = None
+                    if resume_ctx:
+                        resume_indices, resume_vectors = self._load_io_resume_emb()
+                    data, dropped = await self._export_mpj_rebuild(
+                        nb,
+                        max_retries=max_retries,
+                        on_failure=on_failure,
+                        resume_indices=resume_indices,
+                        resume_vectors=resume_vectors,
+                    )
                 else:
                     data = await self._export_mpj_direct(nb)
                 out_name = filename if filename.endswith(".mpj") else f"{filename or nb.name}.mpj"
@@ -264,11 +447,32 @@ class ExportImportMixin:
                 raise RuntimeError("format 只能是 jsonl 或 mpj")
 
             self._save_artifact(data, out_name)
+            self._clear_resume_context()
             self._set_io("export", "done")
+            message = f"导出完成：{out_name}"
+            if dropped:
+                message += f"（跳过 {dropped} 条失败条目）"
             self._write_io_result(
-                {"success": True, "message": f"导出完成：{out_name}", "filename": out_name, "size": len(data), "ctype": ctype}
+                {
+                    "success": True,
+                    "message": message,
+                    "filename": out_name,
+                    "size": len(data),
+                    "ctype": ctype,
+                    "dropped": dropped,
+                }
             )
             self._finish_task(task_id, {"ok": True, "filename": out_name})
+        except TaskInterrupted as exc:
+            self.ctx.logger.warning(f"导出任务中断（on_failure=interrupt）: {exc}")
+            self._interrupt_file_io(
+                "export_mpj",
+                {"notebook": notebook, "format": fmt, "mode": mode, "filename": filename},
+            )
+            self._mark_task_interrupted(task_id, exc)
+            task = self._tasks.get(task_id)
+            if task is not None:
+                task["resume"] = {"kind": "export_mpj"}
         except Exception as exc:
             self.ctx.logger.error(f"导出任务异常: {exc}", exc_info=True)
             self._set_io("export", "error")
@@ -291,8 +495,22 @@ class ExportImportMixin:
             raise RuntimeError("笔记本无索引，无法导出 mpj（请先重建索引）")
         return self._pack_mpj_bytes(files)
 
-    async def _export_mpj_rebuild(self, nb: Notebook) -> bytes:
-        """用第三方 embedding 重新生成索引导出（并发逐条 + 进度）。"""
+    async def _export_mpj_rebuild(
+        self,
+        nb: Notebook,
+        max_retries: int = 3,
+        on_failure: str = "interrupt",
+        resume_indices: set[int] | None = None,
+        resume_vectors: np.ndarray | None = None,
+    ) -> tuple[bytes, int]:
+        """用第三方 embedding 重新生成索引导出（并发逐条 + 进度）。
+
+        支持条目级重试与中断/跳过：
+        - 中断（on_failure=interrupt）：缓存已完成的进度到 file_io 并抛 TaskInterrupted；
+        - 跳过（on_failure=skip）：失败条目同时从 jsonl 与向量中剔除，导出一致子集。
+
+        返回 (mpj bytes, 跳过的条目数)。
+        """
         profile = load_embedding_profile(self._data_dir)
         client = EmbeddingClient(
             base_url=profile.get("base_url", ""),
@@ -309,52 +527,100 @@ class ExportImportMixin:
         total = len(texts)
         concurrent = max(1, min(16, int(profile.get("concurrent", 4) or 4)))
         sem = asyncio.Semaphore(concurrent)
-        vectors: list[list[float] | None] = [None] * total
-        done = 0
 
-        async def worker(i: int, text: str) -> None:
-            nonlocal done
-            async with sem:
-                res = await client.embed([text])
-            if res and len(res) == 1:
-                vectors[i] = res[0]
-            done += 1
-            self._write_io_progress({"phase": "embedding", "done": done, "total": total})
-
-        await asyncio.gather(*(worker(i, t) for i, t in enumerate(texts)))
-        if any(v is None for v in vectors):
-            raise RuntimeError("第三方 embedding 调用失败，请检查配置或网络")
+        vectors: list[np.ndarray | None] = [None] * total
+        done: set[int] = set(int(i) for i in (resume_indices or ()))
+        if resume_indices and resume_vectors is not None:
+            order = sorted(int(i) for i in resume_indices)
+            for i, v in zip(order, resume_vectors):
+                if 0 <= i < total:
+                    vectors[i] = v
+        skipped: list[int] = []
+        interrupt_error: str | None = None
+        interrupt_lock = asyncio.Lock()
 
         expected_dim = int(profile.get("dim", 0) or 0)
-        if expected_dim > 0:
-            for i, v in enumerate(vectors):
-                if len(v) != expected_dim:
-                    raise RuntimeError(
-                        f"第三方 embedding 返回维度 {len(v)} 与配置的向量维度 {expected_dim} 不一致"
-                        f"（第 {i + 1} 条），请检查模型配置"
-                    )
+
+        async def worker(i: int) -> None:
+            nonlocal interrupt_error
+            if vectors[i] is not None or interrupt_error is not None:
+                return
+            async with sem:
+                if interrupt_error is not None:
+                    return
+
+                async def _one() -> tuple[np.ndarray | None, str | None]:
+                    res = await client.embed([texts[i]])
+                    if not res or len(res) != 1:
+                        return None, f"第三方 embedding 失败（条目 {i + 1}/{total}）"
+                    vec = np.asarray(res[0], dtype=np.float32)
+                    if expected_dim > 0 and len(vec) != expected_dim:
+                        return (
+                            None,
+                            f"第三方 embedding 返回维度 {len(vec)} 与配置的向量维度 {expected_dim} 不一致（条目 {i + 1}/{total}）",
+                        )
+                    return vec, None
+
+                vec, error = await run_task_item(
+                    _one,
+                    max_retries,
+                    label=f"导出条目 {i + 1}/{total}",
+                    logger=self.ctx.logger,
+                )
+            if error is None and vec is not None:
+                vectors[i] = vec
+                done.add(i)
+            elif on_failure == "skip":
+                skipped.append(i)
+            else:
+                async with interrupt_lock:
+                    if interrupt_error is None:
+                        interrupt_error = error or "第三方 embedding 失败"
+            if interrupt_error is None:
+                self._write_io_progress({"phase": "embedding", "done": len(done), "total": total})
+
+        await self._run_with_periodic_flush(
+            [worker(i) for i in range(total)], done, vectors, self._io_dir()
+        )
+
+        if interrupt_error is not None:
+            done_idx = sorted(done)
+            if done_idx:
+                done_vecs = np.asarray([vectors[i] for i in done_idx], dtype=np.float32)
+            else:
+                done_vecs = np.zeros((0, 0), dtype=np.float32)
+            save_embed_progress(self._io_dir(), done_idx, done_vecs)
+            raise TaskInterrupted(interrupt_error)
+
+        clear_embed_progress(self._io_dir())
+
+        keep_idx = [i for i in range(total) if vectors[i] is not None]
+        final_entries = [entries[i] for i in keep_idx]
+        final_vecs = [vectors[i] for i in keep_idx]
+        if not final_entries:
+            raise RuntimeError("所有条目 embedding 均失败，无法导出")
 
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
             jsonl_path = tmp / f"{nb.name}.jsonl"
             jsonl_path.write_text(
-                "\n".join(json.dumps(e, ensure_ascii=False) for e in entries) + "\n", encoding="utf-8"
+                "\n".join(json.dumps(e, ensure_ascii=False) for e in final_entries) + "\n", encoding="utf-8"
             )
             npy_path = tmp / f"{nb.name}.embeddings.npy"
-            np.save(npy_path, np.asarray(vectors, dtype=np.float32).astype(np.float16))
+            np.save(npy_path, np.asarray(final_vecs, dtype=np.float32).astype(np.float16))
             meta_path = tmp / f"{nb.name}.index.meta"
             meta_path.write_text(
                 json.dumps(
                     {
                         "md5": hashlib.md5(jsonl_path.read_bytes()).hexdigest(),
-                        "count": len(entries),
+                        "count": len(final_entries),
                         "built_at": time.time(),
                     },
                     ensure_ascii=False,
                 ),
                 encoding="utf-8",
             )
-            return self._pack_mpj_bytes({p.name: p for p in (jsonl_path, npy_path, meta_path)})
+            return self._pack_mpj_bytes({p.name: p for p in (jsonl_path, npy_path, meta_path)}), len(skipped)
 
     @staticmethod
     def _pack_mpj_bytes(files: dict[str, Path]) -> bytes:
@@ -482,7 +748,12 @@ class ExportImportMixin:
     # ============================================================
 
     async def _run_file_commit_task(
-        self, task_id: str, target_name: str, mode: str, merge_target: str
+        self,
+        task_id: str,
+        target_name: str,
+        mode: str,
+        merge_target: str,
+        resume_ctx: dict[str, Any] | None = None,
     ) -> None:
         try:
             meta, entries = self._read_io_preview()
@@ -490,15 +761,36 @@ class ExportImportMixin:
             if not entries:
                 raise RuntimeError("没有可导入的条目")
 
+            # 启动即写续跑上下文：即使进程被强杀/断电，磁盘上也有任务参数可续跑
+            self._write_resume_context(
+                "import_commit",
+                {"target_name": target_name, "mode": mode, "merge_target": merge_target},
+            )
+
+            max_retries, on_failure = self._file_io_retry_cfg()
+            resume_indices: set[int] | None = None
+            resume_vectors: np.ndarray | None = None
+            if resume_ctx:
+                resume_indices, resume_vectors = self._load_io_resume_emb()
+
             if fmt == "mpj" and mode == "direct":
                 if merge_target:
                     raise RuntimeError("mpj 直接导入不支持合并到已有笔记本")
                 npy_path = self._io_dir() / "unpack" / f"{meta.get('source_name')}.embeddings.npy"
                 ok, msg = await self._import_mpj_direct(target_name, entries, npy_path)
             else:
-                ok, msg = await self._import_jsonl_entries(target_name, entries, merge_target)
+                ok, msg = await self._import_jsonl_entries(
+                    target_name,
+                    entries,
+                    merge_target,
+                    max_retries=max_retries,
+                    on_failure=on_failure,
+                    resume_indices=resume_indices,
+                    resume_vectors=resume_vectors,
+                )
 
             if ok:
+                self._clear_resume_context()
                 self._set_io("import", "done")
                 self._write_io_result({"success": True, "message": msg, "notebook": target_name})
                 self._finish_task(task_id, {"ok": True, "message": msg})
@@ -506,6 +798,16 @@ class ExportImportMixin:
                 self._set_io("import", "error")
                 self._write_io_result({"error": msg})
                 self._fail_task(task_id, msg)
+        except TaskInterrupted as exc:
+            self.ctx.logger.warning(f"导入提交任务中断（on_failure=interrupt）: {exc}")
+            self._interrupt_file_io(
+                "import_commit",
+                {"target_name": target_name, "mode": mode, "merge_target": merge_target},
+            )
+            self._mark_task_interrupted(task_id, exc)
+            task = self._tasks.get(task_id)
+            if task is not None:
+                task["resume"] = {"kind": "import_commit"}
         except Exception as exc:
             self.ctx.logger.error(f"文件导入提交任务异常: {exc}", exc_info=True)
             self._set_io("import", "error")
@@ -515,9 +817,16 @@ class ExportImportMixin:
             self._evict_tasks()
 
     async def _import_jsonl_entries(
-        self, target_name: str, entries: list[dict[str, Any]], merge_target: str
+        self,
+        target_name: str,
+        entries: list[dict[str, Any]],
+        merge_target: str,
+        max_retries: int = 3,
+        on_failure: str = "interrupt",
+        resume_indices: set[int] | None = None,
+        resume_vectors: np.ndarray | None = None,
     ) -> tuple[bool, str]:
-        """按内置 embedding 建索引，新建或合并到已有笔记本。"""
+        """按内置 embedding 建索引，新建或合并到已有笔记本（支持中断续跑与跳过失败条目）。"""
         if merge_target:
             nb = self._get_notebook(merge_target)
             if nb is None:
@@ -525,7 +834,7 @@ class ExportImportMixin:
             async with self._lock:
                 if not nb.check_consistency():
                     return False, f"笔记本 '{merge_target}' 索引失效，请先 /mpj rebuild"
-                # 合并时重生成 id，避免与目标冲突
+                # 合并时重生成 id，避免与目标冲突（顺序与 entries 一致，续跑索引对齐）
                 base = int(time.time() * 1000)
                 fresh = [dict(e) for e in entries]
                 existing_ids = {e["id"] for e in nb.load_notes()}
@@ -534,13 +843,25 @@ class ExportImportMixin:
                         e["id"] = scramble_id(base + i * 1000 + len(existing_ids))
                     existing_ids.add(e["id"])
                 texts = [self._build_embedding_text(e["en"], e["zh"], e["note"]) for e in fresh]
-                emb = await self._embed_with_progress(texts)
-                if emb is None:
-                    return False, "embedding 服务不可用"
-                nb.append_entries(fresh, emb)
+                vecs, skipped = await self._embed_with_progress(
+                    texts,
+                    max_retries=max_retries,
+                    on_failure=on_failure,
+                    base_dir=self._io_dir(),
+                    resume_indices=resume_indices,
+                    resume_vectors=resume_vectors,
+                )
+                accepted = [(fresh[i], vecs[i]) for i in range(len(fresh)) if vecs[i] is not None]
+                if not accepted:
+                    return False, "所有条目 embedding 均失败"
+                emb = np.asarray([v for _, v in accepted], dtype=np.float32)
+                nb.append_entries([e for e, _ in accepted], emb)
                 nb.update_md5()
                 self._create_backup(nb)
-            return True, f"已合并 {len(fresh)} 条到笔记本 '{merge_target}'（建议到去重页扫描重复）"
+            msg = f"已合并 {len(accepted)} 条到笔记本 '{merge_target}'（建议到去重页扫描重复）"
+            if skipped:
+                msg += f"，跳过 {len(skipped)} 条失败条目"
+            return True, msg
 
         name = str(target_name or "").strip()
         if not self._valid_notebook_name(name):
@@ -549,18 +870,30 @@ class ExportImportMixin:
             if self._get_notebook(name) is not None:
                 return False, f"笔记本 '{name}' 已存在"
             texts = [self._build_embedding_text(e["en"], e["zh"], e["note"]) for e in entries]
-            emb = await self._embed_with_progress(texts)
-            if emb is None:
-                return False, "embedding 服务不可用"
+            vecs, skipped = await self._embed_with_progress(
+                texts,
+                max_retries=max_retries,
+                on_failure=on_failure,
+                base_dir=self._io_dir(),
+                resume_indices=resume_indices,
+                resume_vectors=resume_vectors,
+            )
+            accepted_entries = [entries[i] for i in range(len(entries)) if vecs[i] is not None]
+            if not accepted_entries:
+                return False, "所有条目 embedding 均失败"
+            accepted_vecs = [vecs[i] for i in range(len(entries)) if vecs[i] is not None]
             nb = Notebook(name, self._data_dir)
             nb.notes_path.parent.mkdir(parents=True, exist_ok=True)
-            json_str = "\n".join(json.dumps(e, ensure_ascii=False) for e in entries) + "\n"
+            json_str = "\n".join(json.dumps(e, ensure_ascii=False) for e in accepted_entries) + "\n"
             nb.notes_path.write_text(json_str, encoding="utf-8")
-            np.save(nb.embeddings_path, np.asarray(emb, dtype=np.float32).astype(np.float16))
-            nb.rewrite_cache(entries)
-            nb.save_meta({"md5": nb.compute_file_md5(), "count": len(entries), "built_at": time.time()})
+            np.save(nb.embeddings_path, np.asarray(accepted_vecs, dtype=np.float32).astype(np.float16))
+            nb.rewrite_cache(accepted_entries)
+            nb.save_meta({"md5": nb.compute_file_md5(), "count": len(accepted_entries), "built_at": time.time()})
             self._notebooks = self._discover_notebooks()
-        return True, f"已导入 {len(entries)} 条到新笔记本 '{name}'"
+        msg = f"已导入 {len(accepted_entries)} 条到新笔记本 '{name}'"
+        if skipped:
+            msg += f"，跳过 {len(skipped)} 条失败条目"
+        return True, msg
 
     async def _import_mpj_direct(
         self, target_name: str, entries: list[dict[str, Any]], npy_path: Path

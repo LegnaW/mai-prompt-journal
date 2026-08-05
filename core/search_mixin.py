@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 
 from .notebook import Notebook
+from .retry import _API_EMBED_TIMEOUT, run_with_retry, scaled_batch_timeout
 
 class SearchMixin:
 
@@ -346,42 +347,59 @@ class SearchMixin:
         return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
     async def _embed_single(self, text: str) -> np.ndarray | None:
-        """对单条文本调用 embedding。"""
-        try:
-            result = await self.ctx.llm.embed(text=text)
-        except Exception as exc:
-            self.ctx.logger.error(f"embedding 调用失败: {exc}")
+        """对单条文本调用 embedding（含超时 + 瞬时失败重试）。"""
+        async def attempt() -> tuple[np.ndarray | None, str | None]:
+            try:
+                result = await self.ctx.llm.embed(text=text)
+            except Exception as exc:
+                return None, f"embedding 调用失败: {exc}"
+            if not isinstance(result, dict) or not result.get("success"):
+                error = result.get("error", "unknown") if isinstance(result, dict) else result
+                return None, f"embedding 返回失败: {error}"
+            vec = result.get("embedding")
+            if not isinstance(vec, list) or not vec:
+                return None, "embedding 返回空向量"
+            return np.asarray(vec, dtype=np.float32), None
+
+        vec, error = await run_with_retry(
+            attempt, timeout=_API_EMBED_TIMEOUT, label="embedding", logger=self.ctx.logger
+        )
+        if error is not None:
+            self.ctx.logger.error(f"embedding 调用失败: {error}")
             return None
-        if not isinstance(result, dict) or not result.get("success"):
-            error = result.get("error", "unknown") if isinstance(result, dict) else result
-            self.ctx.logger.warning(f"embedding 返回失败: {error}")
-            return None
-        vec = result.get("embedding")
-        if not isinstance(vec, list) or not vec:
-            return None
-        return np.asarray(vec, dtype=np.float32)
+        return vec
 
     async def _embed_batch(self, texts: list[str]) -> np.ndarray | None:
-        """对多条文本批量调用 embedding。"""
-        max_concurrent = int(self.config.journal.embed_max_concurrent)
-        try:
-            result = await self.ctx.llm.embed(texts=texts, max_concurrent=max_concurrent)
-        except Exception as exc:
-            self.ctx.logger.error(f"批量 embedding 调用失败: {exc}")
+        """对多条文本批量调用 embedding（含缩放超时 + 瞬时失败重试）。"""
+        async def attempt() -> tuple[np.ndarray | None, str | None]:
+            max_concurrent = int(self.config.journal.embed_max_concurrent)
+            try:
+                result = await self.ctx.llm.embed(texts=texts, max_concurrent=max_concurrent)
+            except Exception as exc:
+                return None, f"批量 embedding 调用失败: {exc}"
+            if not isinstance(result, dict) or not result.get("success"):
+                error = result.get("error", "unknown") if isinstance(result, dict) else result
+                return None, f"批量 embedding 返回失败: {error}"
+            items = result.get("results")
+            if not isinstance(items, list) or len(items) != len(texts):
+                actual = len(items) if isinstance(items, list) else 0
+                return None, f"批量 embedding 结果数量不匹配: 期望 {len(texts)}，实际 {actual}"
+            vectors = []
+            for item in items:
+                vec = item.get("embedding") if isinstance(item, dict) else None
+                if not isinstance(vec, list) or not vec:
+                    return None, "批量 embedding 结果含空向量"
+                vectors.append(vec)
+            return np.asarray(vectors, dtype=np.float32), None
+
+        max_concurrent = max(1, int(getattr(self.config.journal, "embed_max_concurrent", 4)))
+        emb, error = await run_with_retry(
+            attempt,
+            timeout=scaled_batch_timeout(len(texts), max_concurrent),
+            label="批量 embedding",
+            logger=self.ctx.logger,
+        )
+        if error is not None:
+            self.ctx.logger.error(f"批量 embedding 调用失败: {error}")
             return None
-        if not isinstance(result, dict) or not result.get("success"):
-            error = result.get("error", "unknown") if isinstance(result, dict) else result
-            self.ctx.logger.warning(f"批量 embedding 返回失败: {error}")
-            return None
-        items = result.get("results")
-        if not isinstance(items, list) or len(items) != len(texts):
-            actual = len(items) if isinstance(items, list) else 0
-            self.ctx.logger.warning(f"批量 embedding 结果数量不匹配: 期望 {len(texts)}，实际 {actual}")
-            return None
-        vectors = []
-        for item in items:
-            vec = item.get("embedding") if isinstance(item, dict) else None
-            if not isinstance(vec, list) or not vec:
-                return None
-            vectors.append(vec)
-        return np.asarray(vectors, dtype=np.float32)
+        return emb

@@ -273,12 +273,34 @@ function renderTaskItem(t) {
     body = `<span style="color:#4f9afe">${renderTaskProgress(t)}</span>`;
   } else if (t.status === 'done') {
     body = `<span style="color:#2e7d32">完成 — ${renderTaskSummary(t.result)}</span>`;
+  } else if (t.status === 'interrupted') {
+    const canResume = t.resume && t.resume.kind === 'txt_import';
+    body = `<span style="color:#e65100">中断 — ${esc(t.error || '任务已中断')}</span>
+      <span class="row" style="margin-top:6px;gap:8px;">
+        ${canResume ? `<button class="btn btn-outline btn-sm" onclick="resumeTask('${esc(t.id)}')">再次尝试</button>` : ''}
+        <button class="btn btn-outline btn-sm" onclick="cancelTask('${esc(t.id)}')">取消任务</button>
+      </span>`;
   } else {
     body = `<span style="color:#c62828">失败 — ${esc(t.error || '未知错误')}</span>`;
   }
   return `<div style="padding:6px 0;border-bottom:1px solid #f0f0f0;">
     <strong>${esc(t.label || t.type)}</strong> ${body}
   </div>`;
+}
+
+function resumeTask(taskId) {
+  api('POST', '/api/task/resume', { task_id: taskId }).then(data => {
+    if (data.error) { alert(data.error); return; }
+    pollTasks();
+  }).catch(() => {});
+}
+
+function cancelTask(taskId) {
+  if (!confirm('确认取消该任务并清空对应缓存？')) return;
+  api('POST', '/api/task/cancel', { task_id: taskId }).then(data => {
+    if (data.error) { alert(data.error); return; }
+    pollTasks();
+  }).catch(() => {});
 }
 
 function pollTasks() {
@@ -291,17 +313,17 @@ function pollTasks() {
       stopTaskPoll();
       return;
     }
-    const hasRunning = tasks.some(t => t.status === 'running');
+    const hasActive = tasks.some(t => t.status === 'running' || t.status === 'interrupted');
     const prevRunning = document.getElementById('taskCenter').dataset.running === '1';
     list.innerHTML = tasks.map(renderTaskItem).join('');
-    if (hasRunning) {
+    if (hasActive) {
       startTaskPoll();
     } else {
       stopTaskPoll();
     }
-    document.getElementById('taskCenter').dataset.running = hasRunning ? '1' : '0';
+    document.getElementById('taskCenter').dataset.running = hasActive ? '1' : '0';
     // 任务从运行态变为结束态时刷新状态栏（笔记本数量/索引状态可能变化）
-    if (prevRunning && !hasRunning) loadStatus();
+    if (prevRunning && !hasActive) loadStatus();
   }).catch(() => {
     const list = document.getElementById('taskList');
     if (list && list.textContent.includes('加载中')) {

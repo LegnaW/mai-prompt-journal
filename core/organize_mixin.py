@@ -15,6 +15,8 @@ from .constants import (
 )
 from .json_utils import parse_lenient_json
 from .notebook import scramble_id
+from .resume import _TXT_IMPORT_STATE_FILE, save_json
+from .retry import run_task_item, run_with_retry
 
 _JSON_PARSE_HINTS = {
     "no_json": "LLM 返回内容中没有找到 JSON",
@@ -71,58 +73,64 @@ class OrganizeMixin:
         url = f"{base_url}/chat/completions" if base_url.endswith("/v1") else f"{base_url}/v1/chat/completions"
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
-        try:
-            timeout = ClientTimeout(total=max(5, int(cfg.timeout if cfg.timeout is not None else 120)))
-            async with ClientSession(timeout=timeout) as session:
-                async with session.post(url, json=request_body, headers=headers) as resp:
-                    status = resp.status
-                    resp_body = await resp.json()
-        except aiohttp.ClientError as exc:
-            self.ctx.logger.error(f"LLM 直连 HTTP 请求失败: {exc}")
-            return {"success": False, "error": f"LLM API 请求失败: {exc}"}
-        except Exception as exc:
-            self.ctx.logger.error(f"LLM 直连请求异常: {exc}", exc_info=True)
-            return {"success": False, "error": f"LLM API 请求异常: {exc}"}
+        timeout_secs = max(5, int(cfg.timeout if cfg.timeout is not None else 120))
 
-        if status != 200:
-            self.ctx.logger.error(f"LLM API 返回错误: status={status} body={str(resp_body)[:300]}")
-            return {"success": False, "error": f"LLM API 返回错误({status}): {resp_body}"}
+        async def attempt() -> tuple[dict[str, Any], str | None]:
+            try:
+                timeout = ClientTimeout(total=timeout_secs)
+                async with ClientSession(timeout=timeout) as session:
+                    async with session.post(url, json=request_body, headers=headers) as resp:
+                        status = resp.status
+                        resp_body = await resp.json()
+            except aiohttp.ClientError as exc:
+                return {"success": False, "error": f"LLM API 请求失败: {exc}"}, f"LLM API 请求失败: {exc}"
+            except Exception as exc:
+                return {"success": False, "error": f"LLM API 请求异常: {exc}"}, f"LLM API 请求异常: {exc}"
 
-        try:
-            choice = resp_body["choices"][0]
-            message = choice.get("message") or {}
-        except (KeyError, IndexError, TypeError):
-            self.ctx.logger.error(f"LLM API 响应缺少 choices: {str(resp_body)[:300]}")
-            return {"success": False, "error": "LLM API 响应格式异常"}
+            if status != 200:
+                msg = f"LLM API 返回错误({status}): {str(resp_body)[:300]}"
+                return {"success": False, "error": msg}, msg
 
-        content = str(message.get("content") or "")
-        reasoning = str(message.get("reasoning_content") or message.get("reasoning") or "")
+            try:
+                choice = resp_body["choices"][0]
+                message = choice.get("message") or {}
+            except (KeyError, IndexError, TypeError):
+                return {"success": False, "error": "LLM API 响应格式异常"}, "LLM API 响应格式异常"
 
-        tool_calls: list[dict[str, Any]] = []
-        raw_tool_calls = message.get("tool_calls") or []
-        for raw in raw_tool_calls:
-            if not isinstance(raw, dict):
-                continue
-            call_id = str(raw.get("id") or "")
-            function = raw.get("function") or {}
-            name = str(function.get("name") or "")
-            arguments = function.get("arguments")
-            if isinstance(arguments, str):
-                try:
-                    arguments = json.loads(arguments)
-                except json.JSONDecodeError:
+            content = str(message.get("content") or "")
+            reasoning = str(message.get("reasoning_content") or message.get("reasoning") or "")
+
+            tool_calls: list[dict[str, Any]] = []
+            raw_tool_calls = message.get("tool_calls") or []
+            for raw in raw_tool_calls:
+                if not isinstance(raw, dict):
+                    continue
+                call_id = str(raw.get("id") or "")
+                function = raw.get("function") or {}
+                name = str(function.get("name") or "")
+                arguments = function.get("arguments")
+                if isinstance(arguments, str):
+                    try:
+                        arguments = json.loads(arguments)
+                    except json.JSONDecodeError:
+                        arguments = {}
+                if not isinstance(arguments, dict):
                     arguments = {}
-            if not isinstance(arguments, dict):
-                arguments = {}
-            if call_id and name:
-                tool_calls.append({"id": call_id, "function": {"name": name, "arguments": arguments}})
+                if call_id and name:
+                    tool_calls.append({"id": call_id, "function": {"name": name, "arguments": arguments}})
 
-        return {
-            "success": True,
-            "content": content,
-            "reasoning_content": reasoning,
-            "tool_calls": tool_calls or None,
-        }
+            return {
+                "success": True,
+                "content": content,
+                "reasoning_content": reasoning,
+                "tool_calls": tool_calls or None,
+            }, None
+
+        result, error = await run_with_retry(attempt, label="LLM", logger=self.ctx.logger)
+        if result is None and error is not None:
+            self.ctx.logger.error(error)
+            return {"success": False, "error": error}
+        return result
 
     async def _organize_with_llm(
         self, entries: list[dict[str, Any]], requirement: str = ""
@@ -634,45 +642,110 @@ class OrganizeMixin:
         return {"ok": False, "error": "LLM 检索达到最大迭代次数"}
 
     async def _run_import_task(
-        self, task_id: str, segments: list[str], mode_prompt: str, ref_names: list[str]
+        self,
+        task_id: str,
+        segments: list[str],
+        mode_prompt: str,
+        ref_names: list[str],
+        resume_state: dict[str, Any] | None = None,
     ) -> None:
+        """txt 批量写入后台任务。
+
+        每段失败按 `[txt_import].max_retries` 重试；仍失败按 `[txt_import].on_failure`：
+        interrupt → 缓存 `tmp_import/import.state.json` 并置任务为『中断』（可再次尝试/取消，
+        跨插件重载可恢复）；skip → 跳过该段记录失败，继续下一段。
+        """
         cfg = self.config.organize_db
-        failed: list[dict[str, Any]] = []
+        txt_cfg = self.config.txt_import
+        max_retries = int(getattr(txt_cfg, "max_retries", 3) or 0)
+        on_failure = str(getattr(txt_cfg, "on_failure", "interrupt") or "interrupt")
+        if on_failure not in ("interrupt", "skip"):
+            on_failure = "interrupt"
+        failed: list[dict[str, Any]] = list((resume_state or {}).get("failed") or [])
+        seg_status = list((resume_state or {}).get("segment_status") or ["pending"] * len(segments))
         total = len(segments)
+        start_idx = int((resume_state or {}).get("current_index", 0))
+        state_path = self._tmp_import_dir / _TXT_IMPORT_STATE_FILE
+
+        # current 为"下一个待处理段的索引"，随进度更新，保证中断后能准确续跑
+        current = start_idx
+
+        def _persist(status: str) -> None:
+            save_json(
+                state_path,
+                {
+                    "task_id": task_id,
+                    "status": status,
+                    "segments": segments,
+                    "mode_prompt": mode_prompt,
+                    "ref_names": ref_names,
+                    "current_index": current,
+                    "segment_status": seg_status,
+                    "failed": failed,
+                    "created_at": time.time(),
+                },
+            )
+
         try:
             async with self._lock:
-                self._reset_tmp_import()
-                for idx, seg in enumerate(segments, 1):
+                if not resume_state:
+                    self._reset_tmp_import()
+                _persist("running")
+                for idx in range(start_idx, total):
+                    seg = segments[idx]
                     task = self._tasks.get(task_id)
                     if task is not None:
                         task["progress"] = {
                             "total": total,
-                            "done": idx - 1,
-                            "current_index": idx,
+                            "done": idx,
+                            "current_index": idx + 1,
                             "failed_count": len(failed),
                         }
                     log_head = (
-                        f"\n[========== 段 {idx}/{total} ==========]\n"
+                        f"\n[========== 段 {idx + 1}/{total} ==========]\n"
                         f"[时间] {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
                         f"[用户输入]\n{seg}\n"
                     )
                     self._append_import_log(log_head)
                     if mode_prompt:
                         self._append_import_log(f"[附加提示词]\n{mode_prompt}\n")
-                    result = await self._run_import_segment(seg, mode_prompt, cfg, ref_names, task)
-                    if result.get("ok"):
+
+                    async def _run_segment() -> tuple[dict[str, Any] | None, str | None]:
+                        result = await self._run_import_segment(seg, mode_prompt, cfg, ref_names, task)
+                        if result.get("ok"):
+                            return result, None
+                        return None, str(result.get("error", "段处理失败"))
+
+                    result, error = await run_task_item(
+                        _run_segment,
+                        max_retries,
+                        label=f"导入段 {idx + 1}/{total}",
+                        logger=self.ctx.logger,
+                    )
+                    if error is None and result is not None:
+                        seg_status[idx] = "done"
                         self._append_import_log(
                             f"[LLM 决定与理由]\n{result.get('reason', '')}\n"
                             f"[操作]\n{json.dumps(result.get('operations', []), ensure_ascii=False, indent=2)}\n"
                             "[结果] 成功\n"
                         )
+                    elif on_failure == "skip":
+                        seg_status[idx] = "failed"
+                        failed.append({"index": idx + 1, "segment": seg, "error": error})
+                        self._append_import_log(f"[结果] 失败：{error}\n")
                     else:
-                        failed.append({"index": idx, "segment": seg, "error": result.get("error", "")})
-                        self._append_import_log(f"[结果] 失败：{result.get('error', '')}\n")
-                    # 每段执行后更新失败数，保证构建中进度实时准确
+                        # on_failure == interrupt：缓存状态并中断整个导入（从该段续跑）
+                        current = idx
+                        seg_status[idx] = "interrupted"
+                        _persist("interrupted")
+                        self._mark_task_interrupted(task_id, f"段 {idx + 1} 处理失败：{error}")
+                        self.ctx.logger.warning(f"批量导入在段 {idx + 1} 中断（on_failure=interrupt）: {error}")
+                        return
                     if task is not None:
                         task["progress"]["failed_count"] = len(failed)
-                        task["progress"]["done"] = idx
+                        task["progress"]["done"] = idx + 1
+                    current = idx + 1
+                    _persist("running")
 
             if failed:
                 err_lines = ["\n[========== 失败条目汇总 ==========]\n"]
@@ -689,6 +762,12 @@ class OrganizeMixin:
             except Exception as exc:
                 self.ctx.logger.warning(f"写入导入失败汇总失败: {exc}")
 
+            self._tmp_finished_path.write_text("done", encoding="utf-8")
+            if state_path.exists():
+                try:
+                    state_path.unlink()
+                except OSError:
+                    pass
             self._finish_task(
                 task_id,
                 {

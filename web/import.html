@@ -314,11 +314,35 @@ function renderImportStatus(state) {
   } else if (state.state === 'done') {
     card.style.background = '#e8f5e9';
     html = `<div style="color:#2e7d32;"><strong>已完成</strong>：本次导入已结束，可导入新的 txt 文件。</div>`;
+  } else if (state.state === 'interrupted') {
+    card.style.background = '#fff3e0';
+    const p = state.progress || {};
+    const total = p.total || 0;
+    const done = p.done || 0;
+    html = `<div>
+      <div style="color:#e65100;"><strong>已中断</strong>：${esc(state.error || '任务已中断')}</div>
+      <div style="margin-top:6px;color:#8d6e63;">已处理 ${done}/${total} 段，进度已缓存，可选择再次尝试从断点继续，或取消任务。</div>
+      <div class="row" style="margin-top:10px;">
+        <button class="btn btn-sm" onclick="doResumeImport('${esc(state.task_id || '')}')">再次尝试</button>
+        <button class="btn btn-danger btn-sm" onclick="doCancelImport()">取消任务</button>
+      </div>
+    </div>`;
   } else {
     card.style.background = '#f5f5f5';
     html = `<div style="color:#888;">尚未开始：请上传一份 txt 以开始导入。</div>`;
   }
   body.innerHTML = html;
+}
+
+function doResumeImport(taskId) {
+  if (!taskId) { alert('任务 ID 缺失，请刷新页面后重试'); return; }
+  if (!confirm('确认从断点继续导入？已完成段保留，未完成段重新处理。')) return;
+  api('POST', '/api/task/resume', { task_id: taskId }).then(data => {
+    if (data.error) { alert(data.error); return; }
+    importTaskId = taskId;
+    refreshImportState();
+    pollTasks();
+  }).catch(() => {});
 }
 
 let importStateTimer = null;
@@ -327,7 +351,7 @@ function refreshImportState() {
   api('GET', '/api/import/state').then(state => {
     if (state.error) return;
     renderImportStatus(state);
-    setImportDisabled(state.state === 'building');
+    setImportDisabled(state.state === 'building' || state.state === 'interrupted');
     if (state.state === 'ready') {
       if (importStatusFailedRendered === false) {
         renderImportFailed(state);
@@ -335,7 +359,7 @@ function refreshImportState() {
       }
       renderImportNotes();
     }
-    if (state.state === 'building') {
+    if (state.state === 'building' || state.state === 'interrupted') {
       if (!importStateTimer) {
         importStateTimer = setInterval(refreshImportState, 2000);
       }

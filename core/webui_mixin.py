@@ -11,6 +11,12 @@ import numpy as np
 from .constants import _DEDUP_SCAN_BLOCK, _WEBUI_SESSION_TTL, _WEBUI_WARNING_HTML, _WEB_DIR
 from .embedding_client import load_embedding_profile, save_embedding_profile
 from .notebook import Notebook, _split_txt, scramble_id
+from .resume import (
+    STATE_INTERRUPTED,
+    _RESUME_FILE,
+    _TXT_IMPORT_STATE_FILE,
+    load_json,
+)
 
 class WebUIMixin:
 
@@ -59,6 +65,8 @@ class WebUIMixin:
             app.router.add_post("/api/refresh", self._web_refresh)
             app.router.add_post("/api/rebuild", self._web_rebuild)
             app.router.add_get("/api/tasks", self._web_tasks)
+            app.router.add_post("/api/task/resume", self._web_task_resume)
+            app.router.add_post("/api/task/cancel", self._web_task_cancel)
             app.router.add_post("/api/import/preview", self._web_import_preview)
             app.router.add_post("/api/import/start", self._web_import_start)
             app.router.add_get("/api/import/status", self._web_import_status)
@@ -85,6 +93,7 @@ class WebUIMixin:
             app.router.add_get("/api/transfer/state", self._web_transfer_state)
             app.router.add_post("/api/transfer/clear", self._web_transfer_clear)
             app.router.add_post("/api/transfer/cancel", self._web_transfer_cancel)
+            app.router.add_post("/api/transfer/resume", self._web_transfer_resume)
             app.router.add_post("/api/import/file", self._web_import_file)
             app.router.add_get("/api/import/file_preview", self._web_import_file_preview)
             app.router.add_post("/api/import/file_commit", self._web_import_file_commit)
@@ -762,8 +771,11 @@ class WebUIMixin:
         return any(t.get("status") == "running" for t in self._tasks.values())
 
     def _start_task(self, task_type: str, label: str) -> str | None:
-        """登记一个后台任务，返回 task_id；已有任务进行中时返回 None。"""
+        """登记一个后台任务，返回 task_id；已有任务进行中/存在待处置的中断任务时返回 None。"""
         if self._task_busy():
+            return None
+        # 存在待处置（再次尝试/取消）的中断任务时不接受新任务，避免缓存互相覆盖
+        if any(t.get("status") == STATE_INTERRUPTED for t in self._tasks.values()):
             return None
         task_id = uuid.uuid4().hex
         self._tasks[task_id] = {
@@ -816,17 +828,49 @@ class WebUIMixin:
         task["error"] = str(error)
         task["finished_at"] = time.time()
 
+    def _mark_task_interrupted(self, task_id: str, error: Any) -> None:
+        """把任务标记为『中断』（断点续跑前状态，不随 TTL 淘汰）。"""
+        task = self._tasks.get(task_id)
+        if task is None:
+            return
+        task["status"] = STATE_INTERRUPTED
+        task["error"] = str(error)
+        task["finished_at"] = time.time()
+
+    def _clear_task(self, task_id: str) -> None:
+        """移除任务（取消 handle 并删除记录）。"""
+        task = self._tasks.pop(task_id, None)
+        if task is None:
+            return
+        handle = task.get("handle")
+        if handle is not None and not handle.done():
+            handle.cancel()
+
     def _evict_tasks(self) -> None:
-        """通用任务结果保留 TTL 并限制数量。"""
+        """通用任务结果保留 TTL 并限制数量。
+
+        进行中（running）与已中断（interrupted，等待再次尝试/取消）的任务**不淘汰**，
+        只淘汰已完成的 done/error 任务，保证断点续跑可用。
+        """
         ttl = 300.0
         limit = 5
         now = time.time()
-        stale = [tid for tid, t in self._tasks.items() if now - t["created_at"] > ttl]
+        stale = [
+            tid
+            for tid, t in self._tasks.items()
+            if t.get("status") in ("done", "error") and now - t.get("created_at", 0) > ttl
+        ]
         for tid in stale:
             self._tasks.pop(tid, None)
-        if len(self._tasks) > limit:
-            oldest = sorted(self._tasks.items(), key=lambda kv: kv[1]["created_at"])
-            for tid, _ in oldest[: len(self._tasks) - limit]:
+        # 只对"可淘汰"任务计数做上限约束，不计算 running/interrupted
+        evictable = {
+            tid: t
+            for tid, t in self._tasks.items()
+            if t.get("status") in ("done", "error")
+        }
+        if len(evictable) > limit:
+            oldest = sorted(evictable.items(), key=lambda kv: kv[1].get("created_at", 0))
+            for tid, _ in oldest[: len(evictable) - limit]:
                 self._tasks.pop(tid, None)
 
     async def _web_tasks(self, request: Any) -> Any:
@@ -840,6 +884,109 @@ class WebUIMixin:
         # handle 是内部 asyncio.Task 对象，不可 JSON 序列化，对外剔除
         clean = [{k: v for k, v in t.items() if k != "handle"} for t in tasks]
         return web.json_response({"tasks": clean})
+
+    def _restore_interrupted_tasks(self) -> None:
+        """插件重载后从磁盘恢复被中断的任务（当前支持 txt 批量导入），供『再次尝试/取消』。"""
+        state_path = self._tmp_import_dir / _TXT_IMPORT_STATE_FILE
+        state = load_json(state_path)
+        if not state or not state.get("task_id"):
+            return
+        if self._tmp_finished_path.exists():
+            return  # 已完成，忽略陈旧状态
+        if state.get("status") not in (STATE_INTERRUPTED, "running"):
+            return
+        task_id = str(state.get("task_id", "") or "")
+        if not task_id or task_id in self._tasks:
+            return
+        segments = state.get("segments")
+        if not isinstance(segments, list) or not segments:
+            return
+        current_index = int(state.get("current_index", 0))
+        self._tasks[task_id] = {
+            "id": task_id,
+            "type": "import",
+            "label": "txt 批量导入",
+            "status": STATE_INTERRUPTED,
+            "progress": {
+                "total": len(segments),
+                "done": current_index,
+                "current_index": current_index + 1,
+                "failed_count": len(state.get("failed") or []),
+            },
+            "created_at": time.time(),
+            "finished_at": time.time(),
+            "result": None,
+            "error": f"任务已中断（已处理 {current_index}/{len(segments)} 段）",
+            "handle": None,
+            "resume": {"kind": "txt_import", "state": state},
+        }
+        self.ctx.logger.info(f"已从磁盘恢复中断的 txt 批量导入任务 {task_id}")
+
+    async def _web_task_resume(self, request: Any) -> Any:
+        """再次尝试（续跑）被中断的后台任务（当前支持 txt 批量导入）。"""
+        from aiohttp import web
+
+        if not self._web_check_auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        body = await self._web_read_body(request)
+        task_id = str(body.get("task_id", "") or "").strip()
+        task = self._tasks.get(task_id)
+        if task is None:
+            return web.json_response({"error": "任务不存在或已过期"}, status=404)
+        if task.get("status") != STATE_INTERRUPTED:
+            return web.json_response({"error": "任务未处于中断状态"}, status=400)
+        if self._task_busy():
+            return web.json_response({"error": "已有后台任务进行中，请等待完成后再试"}, status=409)
+
+        resume = task.get("resume") or {}
+        kind = resume.get("kind")
+        if kind == "import_commit" or kind == "export_mpj":
+            return web.json_response(
+                {"error": "请在『传输状态』面板选择再次尝试（此任务不支持在任务栏续跑）"}, status=400
+            )
+        if kind != "txt_import":
+            return web.json_response({"error": "不支持续跑该类型任务"}, status=400)
+        state = resume.get("state") or {}
+        segments = state.get("segments")
+        if not isinstance(segments, list) or not segments:
+            return web.json_response({"error": "续跑数据缺失，请取消后重新导入"}, status=400)
+
+        task["status"] = "running"
+        task["error"] = None
+        task["finished_at"] = None
+        handle = asyncio.create_task(
+            self._run_import_task(
+                task_id,
+                segments,
+                str(state.get("mode_prompt", "") or ""),
+                [str(n or "").strip() for n in (state.get("ref_names") or []) if str(n or "").strip()],
+                resume_state=state,
+            )
+        )
+        task["handle"] = handle
+        return web.json_response({"success": True, "task_id": task_id})
+
+    async def _web_task_cancel(self, request: Any) -> Any:
+        """取消被中断的后台任务（再次尝试之前放弃），并清理对应缓存。"""
+        from aiohttp import web
+
+        if not self._web_check_auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        body = await self._web_read_body(request)
+        task_id = str(body.get("task_id", "") or "").strip()
+        task = self._tasks.get(task_id)
+        if task is None:
+            return web.json_response({"error": "任务不存在或已过期"}, status=404)
+        resume = task.get("resume") or {}
+        kind = resume.get("kind")
+        task_type = task.get("type")
+        self._clear_task(task_id)
+        if kind == "txt_import" or task_type == "import":
+            async with self._lock:
+                self._reset_tmp_import()
+        elif kind in ("import_commit", "export_mpj") or task_type in ("import_file_commit", "export"):
+            self._reset_io()
+        return web.json_response({"success": True})
 
     async def _web_import_preview(self, request: Any) -> Any:
         """上传 txt → 切分 → 返回段落列表（不落盘）。"""
@@ -899,7 +1046,7 @@ class WebUIMixin:
         return web.json_response({"task_id": task_id, "count": len(segments)})
 
     async def _web_import_status(self, request: Any) -> Any:
-        """查询导入任务状态（含失败汇总）。"""
+        """查询导入任务状态（含失败汇总 / 中断续跑）。"""
         from aiohttp import web
 
         if not self._web_check_auth(request):
@@ -912,6 +1059,10 @@ class WebUIMixin:
             return web.json_response({"status": "running", "progress": task["progress"]})
         if task["status"] == "done":
             return web.json_response({"status": "done", "result": task["result"]})
+        if task["status"] == STATE_INTERRUPTED:
+            return web.json_response(
+                {"status": "interrupted", "error": task.get("error", "任务已中断"), "progress": task.get("progress")}
+            )
         return web.json_response({"status": "error", "error": task.get("error", "")})
 
     async def _web_import_tmp_notes(self, request: Any) -> Any:
@@ -1012,12 +1163,17 @@ class WebUIMixin:
             )
 
     async def _web_import_cancel(self, request: Any) -> Any:
-        """取消当前进行中的导入任务并清空缓存目录。"""
+        """取消进行中或被中断的导入任务并清空缓存目录。"""
         from aiohttp import web
 
         if not self._web_check_auth(request):
             return web.json_response({"error": "unauthorized"}, status=401)
         cancelled = self._cancel_running_task("import")
+        # 同时清理被中断（等待再次尝试/取消）的导入任务
+        for tid, t in list(self._tasks.items()):
+            if t.get("status") == STATE_INTERRUPTED and (t.get("type") == "import" or (t.get("resume") or {}).get("kind") == "txt_import"):
+                self._clear_task(tid)
+                cancelled = True
         async with self._lock:
             self._reset_tmp_import()
         return web.json_response({"success": True, "cancelled": cancelled})
@@ -1040,6 +1196,24 @@ class WebUIMixin:
                     "state": "building",
                     "progress": progress,
                     "failed_count": progress.get("failed_count", 0),
+                }
+            )
+
+        # 中断：等待再次尝试或取消（断点续跑，可跨插件重载恢复）
+        interrupted = [
+            t
+            for t in self._tasks.values()
+            if t.get("status") == STATE_INTERRUPTED and t.get("type") == "import"
+        ]
+        if interrupted:
+            t = interrupted[0]
+            progress = dict(t.get("progress", {}))
+            return web.json_response(
+                {
+                    "state": "interrupted",
+                    "task_id": t.get("id", ""),
+                    "error": t.get("error", "任务已中断"),
+                    "progress": progress,
                 }
             )
 
@@ -1272,14 +1446,29 @@ class WebUIMixin:
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
+    def _effective_io_state(self) -> str:
+        """传输状态机的"对外有效状态"。
+
+        正常情况下返回 file_io/state；但若存储状态是 importing/building 且存在
+        resume.json、又没有正在运行的任务，说明是进程被强杀/断电后的残留 →
+        对外呈现为 interrupted（续跑上下文在磁盘上可恢复），前端据此提供
+        「再次尝试/取消」。
+        """
+        state = self._get_io_state()
+        if state in ("importing", "building"):
+            resume = load_json(self._io_dir() / _RESUME_FILE)
+            if resume and not self._task_busy():
+                return STATE_INTERRUPTED
+        return state
+
     async def _web_transfer_state(self, request: Any) -> Any:
-        """查询统一传输状态（导入/导出，抗刷新）。"""
+        """查询统一传输状态（导入/导出，抗刷新/抗重启）。"""
         from aiohttp import web
 
         if not self._web_check_auth(request):
             return web.json_response({"error": "unauthorized"}, status=401)
         kind = self._get_io_kind()
-        state = self._get_io_state()
+        state = self._effective_io_state()
         resp: dict[str, Any] = {"kind": kind, "state": state}
         resp["progress"] = self._read_io_progress() or None
         if state == "ready":
@@ -1287,6 +1476,12 @@ class WebUIMixin:
             resp["preview"] = meta
         elif state in ("done", "error"):
             resp["result"] = self._read_io_result()
+        elif state == STATE_INTERRUPTED:
+            # 断点续跑：回传续跑上下文与已完成的 embedding 进度
+            resume = load_json(self._io_dir() / _RESUME_FILE)
+            resp["resume"] = resume
+            _done, _vecs = self._load_io_resume_emb()
+            resp["resume_done"] = len(_done)
         return web.json_response(resp)
 
     async def _web_transfer_clear(self, request: Any) -> Any:
@@ -1299,14 +1494,80 @@ class WebUIMixin:
         return web.json_response({"success": True, "state": "none"})
 
     async def _web_transfer_cancel(self, request: Any) -> Any:
-        """取消进行中的导入/导出后台任务并清空状态。"""
+        """取消进行中或被中断的导入/导出后台任务并清空状态。"""
         from aiohttp import web
 
         if not self._web_check_auth(request):
             return web.json_response({"error": "unauthorized"}, status=401)
         cancelled = self._cancel_running_task()
+        # 清理被中断的传输任务（type import_file_commit / export）
+        for tid, t in list(self._tasks.items()):
+            if t.get("status") == STATE_INTERRUPTED and (t.get("resume") or {}).get("kind") in (
+                "import_commit",
+                "export_mpj",
+            ):
+                self._clear_task(tid)
+                cancelled = True
         self._reset_io()
         return web.json_response({"success": True, "cancelled": cancelled, "state": "none"})
+
+    async def _web_transfer_resume(self, request: Any) -> Any:
+        """再次尝试（续跑）被中断的笔记本导入/导出任务。"""
+        from aiohttp import web
+
+        if not self._web_check_auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        if self._effective_io_state() != STATE_INTERRUPTED:
+            return web.json_response({"error": "当前没有可续跑的传输任务"}, status=400)
+        if self._task_busy():
+            return web.json_response({"error": "已有后台任务进行中，请等待完成后再试"}, status=409)
+
+        resume = load_json(self._io_dir() / _RESUME_FILE)
+        kind = resume.get("kind")
+        # 清理残留的中断任务记录
+        for tid, t in list(self._tasks.items()):
+            if t.get("status") == STATE_INTERRUPTED and (t.get("resume") or {}).get("kind") == kind:
+                self._clear_task(tid)
+
+        if kind == "import_commit":
+            task_id = self._start_task("import_file_commit", "笔记本导入（续跑）")
+            if task_id is None:
+                return web.json_response({"error": "已有后台任务进行中，请等待完成后再试"}, status=409)
+            self._set_io("import", "importing")
+            handle = asyncio.create_task(
+                self._run_file_commit_task(
+                    task_id,
+                    str(resume.get("target_name", "") or ""),
+                    str(resume.get("mode", "") or ""),
+                    str(resume.get("merge_target", "") or ""),
+                    resume_ctx=resume,
+                )
+            )
+            if self._tasks.get(task_id) is not None:
+                self._tasks[task_id]["handle"] = handle
+            return web.json_response({"success": True, "task_id": task_id, "kind": "import", "state": "importing"})
+
+        if kind == "export_mpj":
+            task_id = self._start_task("export", "笔记本导出（续跑）")
+            if task_id is None:
+                return web.json_response({"error": "已有后台任务进行中，请等待完成后再试"}, status=409)
+            # 注意：续跑不能 _reset_io()，否则会清掉 partial_emb.npz / resume.json 缓存
+            self._set_io("export", "building")
+            handle = asyncio.create_task(
+                self._run_export_task(
+                    task_id,
+                    str(resume.get("notebook", "") or ""),
+                    str(resume.get("format", "") or ""),
+                    str(resume.get("mode", "") or ""),
+                    str(resume.get("filename", "") or ""),
+                    resume_ctx=resume,
+                )
+            )
+            if self._tasks.get(task_id) is not None:
+                self._tasks[task_id]["handle"] = handle
+            return web.json_response({"success": True, "task_id": task_id, "kind": "export", "state": "building"})
+
+        return web.json_response({"error": "续跑上下文缺失"}, status=400)
 
     async def _web_import_file(self, request: Any) -> Any:
         """上传 jsonl/mpj 文件并启动后台校验任务。"""

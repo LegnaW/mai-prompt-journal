@@ -27,6 +27,7 @@
 
 ## 近期更新（dev 分支，未发布）
 
+- **长程任务重试兜底 + 断点续跑**：embedding/LLM API 增加瞬时失败重试与超时（`core/retry.py`）；txt 批量写入、笔记本导入/导出支持条目级重试，失败后可「中断（缓存进度、再次尝试/取消）」或「跳过」，新增 `interrupted` 状态与磁盘续跑缓存（`core/resume.py`）。embed 进度**每 10s 周期落盘 + 原子写 + 上一份备份**，进程被强杀/断电时最多丢最后 10s 进度，重载后通过 `_effective_io_state` 呈现为可续跑的中断状态。详见下文「重试与断点续跑」章节。
 - **WebUI 活跃任务栏收起**：`injectTaskCenter` 头部新增收起/展开按钮（`toggleTaskCenter`，`web/app.js`），任务列表可折叠；`.hidden` 需 `!important` 故不受影响。
 - **导出默认格式改为 mpj**：`exportFormat` 下拉默认选中 mpj，页面加载后文件名自动填 `default.mpj`。
 - **第三方 embedding 配置新增「向量维度」**：`embedding_profile.json` 新增可选 `dim` 字段（WebUI 表单 `embDim` 输入并自动预填）；后端 `_web_embedding_profile_save` 支持存取；`_export_mpj_rebuild` 导出时若配置了 `dim` 会逐条核对第三方返回的向量维度，不符即报错中止，防止导出损坏的 mpj（`core/export_import_mixin.py`）。
@@ -56,6 +57,8 @@
 | `core/backup_mixin.py` | `BackupMixin`：笔记本自动备份（创建/列表/恢复/删除/上限淘汰，`data_dir/backups/{name}/{时间戳}.jsonl`） |
 | `core/export_import_mixin.py` | `ExportImportMixin`：笔记本导出（jsonl/mpj）/ 文件导入（后台校验 + 提交 + 抗刷新暂存 `data_dir/file_import/`） |
 | `core/embedding_client.py` | 第三方 OpenAI 兼容 embedding 客户端 + 配置存取（`data_dir/embedding_profile.json`） |
+| `core/retry.py` | API 调用重试兜底：瞬时失败判定（`is_transient_error`）、单次调用重试（`run_with_retry`）、任务条目级重试（`run_task_item`）、embedding 超时常量 |
+| `core/resume.py` | 中断任务磁盘缓存与断点续跑：`TaskInterrupted`、resume.json / partial_emb.npz 读写、`STATE_INTERRUPTED` |
 | `core/mpj.py` | mpj 打包/解包 + `checksum.sha256` 校验码 |
 | `core/webui_mixin.py` | `WebUIMixin`：WebUI 服务器 + 全部 API + 后台任务中心 + 去重扫描 |
 | `web/index.html` | WebUI 首页（状态栏 + 搜索/浏览 + 添加） |
@@ -224,7 +227,7 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 - **临时笔记本**：固定名 `tmp`，文件在 `data_dir/tmp_import/`（`tmp.jsonl` / `tmp.cache.jsonl` / `tmp.embeddings.npy` / `tmp.index.meta` / `import.log`），用 `Notebook("tmp", data_dir, custom_dir=tmp_import_dir)` 构造，**不参与** `_discover_notebooks`（但 `_get_notebook("tmp")` 返回它，供 `/api/modify`、`/api/delete` 编辑临时条目）。一轮完成后**不清理**；下一轮导入开始前 `_reset_tmp_import()` 清空。
 - **一段一完整循环**：`_run_import_segment` 对每段独立跑 agent 循环（多轮 search_notes），搜索范围 = 用户选择的引用笔记本 + 临时笔记本（`_execute_search_notes_multi`）；系统提示词 = `advanced.organize_db_system_prompt` + `\n` + `advanced.batch_import_prompt`（`{temp-journal}` 替换为 `tmp`，约束 LLM 只能改临时笔记本）；输出完整 create/update/delete，`_apply_ops_to_tmp` 应用后 `_rebuild_notebook(tmp)` 增量重建，下一段可见。
 - **模式（附加提示词）是纯前端**：`web/import.html` 五模式单选（学习描述方式/导入oc设计/提取动作模板/提取服饰穿搭/自定义），预设直接发对应 `IMPORT_MODE_PROMPTS` 文本，自定义弹窗输入；`POST /api/import/start` 的 `mode_prompt` 字段后端仅校验非空（双重校验）。
-- **失败处理**：某段 LLM 调用/解析/写入失败 → 跳过该段，记录到 result.failed，继续下一段；导入完成后把失败汇总追加到 `import.log` 末尾。
+- **失败处理**：某段 LLM 调用/解析/写入失败 → 按 `[txt_import].max_retries` 重试；仍失败按 `[txt_import].on_failure`：`skip`=跳过该段记录到 result.failed 继续下一段；`interrupt`=缓存 `tmp_import/import.state.json` 并置任务为中断（导入页「再次尝试/取消」，跨插件重载可恢复）。导入完成后把失败汇总追加到 `import.log` 末尾。
 - **日志**：`import.log` 记录每段时间、用户输入、附加提示词、LLM 决定与理由（reason + operations）、成功/失败。
 - **处置**（`POST /api/import/resolve`）：`merge` 合并入已有笔记本（复用 tmp 向量直接追加）、`create` 新建笔记本（复制 tmp 四文件到 `imports/{new_name}.jsonl`，`_discover_notebooks` 自动发现）、`discard` 丢弃（仅清空状态，文件留给下一轮清理）。
 - **API**：`POST /api/import/preview`（切分预览）/ `POST /api/import/start` / `GET /api/import/status` / `GET /api/import/tmp_notes` / `GET /api/import/log` / `POST /api/import/resolve`。
@@ -252,9 +255,9 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 - **校验码**：`checksum.sha256` 缺失或对不上都视为"可能被第三方修改"，前端显示警告并要求勾选"我已了解风险"才能提交（同一警告文案）。
 - **抽样相似度警告**：`renderImportPreview` 中抽样**最小相似度 < 0.95** 时数值红色加粗，并追加红底提示「你的 embedding 极可能和文件导出者用的不一致，请重建索引导入」（阈值仅前端）。
 - 预览：新笔记本名称**默认取上传文件名**（去扩展名，输入框在预览面板）；目标（新建/合并）+ 按钮 **直接导入（仅 mpj 且维度/数量一致时显示）/ 重建索引导入 / 清除**（校验码异常需勾选"我已了解风险"才可点导入）。
-- 提交：jsonl / mpj-rebuild → 内置 embedding 全量建索引 → **新建或合并**（合并时重生成 id 防冲突，前端提醒去重）；mpj-direct → 保留 mpj 自带索引（仅新建，需维度一致 + 条目数=向量数）。
-- **进度与取消**：`file_io/progress.json` 由 `_write_io_progress` 写入（phase/done/total；导入用 `_embed_with_progress` 信号量并发逐条 embed，并发取 `config.journal.embed_max_concurrent`；mpj 校验抽样逐条）；前端状态元素显示 `(xx/xx)` + **取消按钮**（`POST /api/transfer/cancel` → `_cancel_running_task()` + `_reset_io()`）。
-- 端点：`GET /api/transfer/state`（统一状态+进度，抗刷新）/ `POST /api/transfer/clear` / `POST /api/transfer/cancel` / `GET /api/import/file_preview?page=&size=` / `POST /api/import/file_commit`。
+- 提交：jsonl / mpj-rebuild → 内置 embedding 全量建索引 → **新建或合并**（合并时重生成 id 防冲突，前端提醒去重）；mpj-direct → 保留 mpj 自带索引（仅新建，需维度一致 + 条目数=向量数）。条目 embed 失败按 `[file_io].max_retries` 重试，仍失败按 `[file_io].on_failure`：`skip`=跳过失败条目导入成功子集；`interrupt`=缓存 `file_io/resume.json` + `partial_emb.npz` 并置传输状态为中断（「再次尝试」从断点续算，不重复 embed 已完成条目）。
+- **进度与取消**：`file_io/progress.json` 由 `_write_io_progress` 写入（phase/done/total；导入用 `_embed_with_progress` 信号量并发逐条 embed，并发取 `config.journal.embed_max_concurrent`；mpj 校验抽样逐条）；前端状态元素显示 `(xx/xx)` + **取消按钮**（`POST /api/transfer/cancel` → `_cancel_running_task()` + `_reset_io()`）；中断状态可用 `POST /api/transfer/resume` 续跑。
+- 端点：`GET /api/transfer/state`（统一状态+进度，抗刷新）/ `POST /api/transfer/clear` / `POST /api/transfer/cancel` / `POST /api/transfer/resume` / `GET /api/import/file_preview?page=&size=` / `POST /api/import/file_commit`。
 - `client_max_size` 已放宽到 256MB（支持大 mpj）。
 
 ### 关键约束
@@ -279,6 +282,8 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 | 6 | `[organize_db]` | 操作数据库开关 / 轮数 / 条数 |
 | 7 | `[advanced]` | **高级**：`dedup_merge_system_prompt` / `organize_db_system_prompt` / `batch_import_prompt` / `dedup_scan_block`（默认不建议改） |
 | 8 | `[backup]` | 备份：`enabled`（默认 true）/ `max_per_notebook`（默认 6） |
+| 9 | `[txt_import]` | txt 批量写入重试：`max_retries`（默认 3）/ `on_failure`（interrupt/skip，默认 interrupt） |
+| 10 | `[file_io]` | 导入/导出重试：`max_retries`（默认 3）/ `on_failure`（interrupt/skip，默认 interrupt） |
 
 **配置迁移机制（重要，勿破坏）**：
 - host 在 `config_version` **升高**时，以最新默认配置为骨架重建并写回文件（runner_main `_prepare_plugin_config_for_version_update`）；键路径不变的旧值自动保留，**被删除的键值会在进入钩子前被丢弃**。
@@ -303,6 +308,69 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 - 正确写法：`pattern=r"^/mpj\s+new\s+(?P<name>.+)$"`，handler 里 `matched_groups.get("name")`。
 - 参考：内置插件管理命令用 `matched_groups.get("manage_command")`；本插件 `/mpj rebuild` 的 `(?P<full>--full)` 同理。
 - 新增带参数命令时，务必用命名组，并同步在此登记 group 名。
+
+## 重试与断点续跑（长程任务健壮性）
+
+所有依赖 embedding / LLM API 的长程 WebUI 任务（重建索引、去重整理、操作数据库、
+txt 批量写入、笔记本导入/导出）共两层兜底，**改动时勿破坏分层**：
+
+### 第 1 层：API 调用级重试 + 超时（`core/retry.py`）
+- `run_with_retry`：单次 API 调用最多 `_API_RETRIES=3` 次尝试，指数退避
+  （1s/2s/4s），**只对瞬时失败重试**（`is_transient_error`：超时/网络/429/5xx 等，
+  5xx 需带上下文如 `(503)`/`status=503`，避免误匹配向量维度数字）；业务错误不重试。
+- `run_task_item`：任务"条目级"重试，**不论是否瞬时**都重试 max_retries 次
+  （对应 `[txt_import]` / `[file_io]` 的 `max_retries`，0 表示只尝试一次）。
+- 接线位置：
+  - `_embed_single`（`search_mixin.py`）：补 `_API_EMBED_TIMEOUT=60s` 超时
+    （现状宿主 `ctx.llm.embed` 无超时，宿主卡住会永久挂起）+ 瞬时重试。
+  - `_embed_batch`：`scaled_batch_timeout`（按条数/并发缩放，避免大批次被误杀）+ 瞬时重试。
+  - `_direct_chat`（`organize_mixin.py`）：瞬时重试（幂等单轮，安全）。
+  - `EmbeddingClient.embed`（`embedding_client.py`）：瞬时重试。
+
+### 第 2 层：任务级「中断 / 跳过」+ 断点续跑（`core/resume.py`）
+- 配置：`[txt_import]`（txt 段）与 `[file_io]`（导入导出条目）各有一组
+  `max_retries`（默认 3）与 `on_failure`（`interrupt`/`skip`，默认 `interrupt`）。
+- 条目仍失败后：
+  - `interrupt`：保存续跑上下文到**磁盘**，任务置 `interrupted`；用户可选「再次尝试」
+    或「取消」。**磁盘缓存可跨插件重载恢复**。
+  - `skip`：跳过失败条目/段并记录，任务继续（导出 mpj 时失败条目会被丢弃，
+    只导出成功子集，日志会提示丢弃数量）。
+- **中断缓存位置**：
+  - txt 批量写入：`tmp_import/import.state.json`（segments + mode_prompt + ref_names +
+    current_index + segment_status + failed）。
+  - 导入/导出：`file_io/resume.json`（任务上下文）+ `file_io/partial_emb.npz`
+    （已完成条目的索引与向量）。「再次尝试」读缓存续算，**不重复 embed 已完成的条目**。
+- **周期落盘 + 崩溃容错（重要）**：
+  - embed 循环（`_embed_with_progress` / `_export_mpj_rebuild`）用
+    `_run_with_periodic_flush` 每 `_PROGRESS_FLUSH_INTERVAL=10s` 把已完成进度写盘一次，
+    进程被强杀/断电时**最多丢最后 10s** 的进度（`core/retry.py` 无此项，见 `core/resume.py`）。
+  - `save_embed_progress` 是**原子写 + 上一份备份**：先把旧快照旋转为 `.bak`，新快照写
+    `.tmp` → fsync → 原子改名；`load_embed_progress` 主快照解析失败时回退 `.bak`。
+    **不要改回直接写目标文件**（中途崩溃会留撕裂 npz）。
+  - `resume.json` **任务启动即写**（`_write_resume_context`），成功完成删除
+    （`_clear_resume_context`）——即使强杀，磁盘上也有任务参数可续跑。
+  - **强杀残留识别**：`_effective_io_state()` 把"存储状态是 importing/building 但
+    resume.json 存在且无运行任务"的崩溃残留呈现为 `interrupted`（`_web_transfer_state`
+    与 `_web_transfer_resume` 使用），前端无需改动即可提供再次尝试/取消。
+- **状态机**：`self._tasks` 状态新增 `interrupted`（`STATE_INTERRUPTED`），
+  被中断任务**不随 `_evict_tasks` 淘汰**（直到再次尝试或取消）；传输状态机
+  `file_io/state` 新增 `interrupted`。
+- 端点：`POST /api/task/resume` / `POST /api/task/cancel`（txt 导入，task_id 定位）、
+  `POST /api/transfer/resume`（导入/导出，读 resume.json）。
+- 恢复入口：`plugin.on_load` 调 `_restore_interrupted_tasks()`，从 `import.state.json`
+  重建中断的 txt 导入任务（`_web_import_state`/`_web_import_status` 据此展示）。
+- 前端：`web/app.js` 任务栏、`web/import.html`、`web/notebooks.html` 均渲染
+  `interrupted`（再次尝试/取消按钮）。
+
+### 关键约束
+- **导出 `skip` 会丢数据**：mpj 重建导出跳过失败条目 = 同时从 jsonl 与向量剔除
+  （保持 jsonl/向量数量一致），结果文件比源笔记本少条目，前端/日志需提示。
+- **中断缓存是磁盘真相**：txt 导入的 state.json 与导入导出的 resume.json/partial_emb
+  是唯一可续跑依据；`_reset_tmp_import()` / `_reset_io()` 会清掉它们（= 取消）。
+- **存在中断任务时 `_start_task` 拒绝新任务**（返回 None → 409），要求先「再次尝试/取消」，
+  避免缓存互相覆盖与任务堆积。
+- 去重整理 / 操作数据库 / 重建索引**没有**第 2 层（失败直接报错、前端重试），
+  只受第 1 层 API 兜底保护。
 
 ## WebUI 规范
 
@@ -406,3 +474,8 @@ schema = generate_plugin_config_schema(m.PromptJournalConfig)
 - 改配置模型字段时，若只是加 `json_schema_extra` 元数据，**无需 bump `config_version`**（config.toml 里值不变）
 - `[dedup_merge]` / `[organize_db]` / `[advanced]` / `[llm]` 配置改动需重启插件生效（`self.config` 加载时读取，无热更新）
 - 改 `_manifest.json` capabilities 后必须**重载插件**才会重新注册能力令牌（否则 E_CAPABILITY_DENIED）
+- **API 重试分层勿破坏**：第 1 层 `run_with_retry`（单次调用、仅瞬时失败）与第 2 层 `run_task_item`（条目级、任意失败都重试）语义不同；5xx 判定需带上下文（`(503)`/`status=503`），**不要改回裸 `\b5\d\d\b`**（会误匹配向量维度数字）
+- **中断续跑缓存是磁盘真相**：`tmp_import/import.state.json`、`file_io/resume.json` + `file_io/partial_emb.npz`（及 `.bak`）是"再次尝试"的唯一依据；`_reset_tmp_import()` / `_reset_io()` 会清掉它们（= 取消）。改动重置逻辑时勿漏
+- **`save_embed_progress` 的原子写+备份勿回退**：快照写 `.tmp`→fsync→改名，旧快照旋转为 `.bak`；加载主快照失败回退 `.bak`。别直接写目标文件（强杀会留撕裂 npz）
+- **周期落盘间隔 `_PROGRESS_FLUSH_INTERVAL`**（10s，`core/resume.py`）：改小更抗崩溃但增加大笔记本 IO 开销；改大则强杀丢失的进度更多
+- 新增会中断的长程任务时：置 `interrupted` 状态 + 写续跑缓存 + `_restore_interrupted_tasks` 恢复 + 前端渲染，四者缺一不可

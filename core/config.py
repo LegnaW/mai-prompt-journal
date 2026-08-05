@@ -1,5 +1,7 @@
 """插件配置模型。"""
 
+from typing import Literal
+
 from maibot_sdk import Field, PluginConfigBase
 
 from .constants import (
@@ -367,6 +369,66 @@ class BackupConfig(PluginConfigBase):
     )
 
 
+class TxtImportConfig(PluginConfigBase):
+    """txt 批量写入的重试与失败处理。"""
+
+    __ui_label__ = "txt 批量写入"
+    __ui_icon__ = "file-text"
+    __ui_order__ = 9
+
+    max_retries: int = Field(
+        default=3,
+        ge=0,
+        le=20,
+        description="每个段失败后的最大重试次数",
+        json_schema_extra={
+            "label": "失败最大重试",
+            "hint": "单个段处理失败后最多重试几次（含 API 层的瞬时失败兜底），0 表示不额外重试",
+            "order": 0,
+            "x-widget": "number",
+        },
+    )
+    on_failure: Literal["interrupt", "skip"] = Field(
+        default="interrupt",
+        description="段重试仍失败后的行为",
+        json_schema_extra={
+            "label": "失败后行为",
+            "hint": "interrupt=中断整个导入并缓存进度，可在导入页选择再次尝试或取消；skip=跳过该段并记录到失败列表，继续处理下一段",
+            "order": 1,
+        },
+    )
+
+
+class FileIOConfig(PluginConfigBase):
+    """笔记本导入/导出（jsonl / mpj）的重试与失败处理。"""
+
+    __ui_label__ = "导入 / 导出"
+    __ui_icon__ = "file-import"
+    __ui_order__ = 10
+
+    max_retries: int = Field(
+        default=3,
+        ge=0,
+        le=20,
+        description="每个条目失败后的最大重试次数",
+        json_schema_extra={
+            "label": "失败最大重试",
+            "hint": "单个条目 embed 失败后最多重试几次（含 API 层的瞬时失败兜底），0 表示不额外重试",
+            "order": 0,
+            "x-widget": "number",
+        },
+    )
+    on_failure: Literal["interrupt", "skip"] = Field(
+        default="interrupt",
+        description="条目重试仍失败后的行为",
+        json_schema_extra={
+            "label": "失败后行为",
+            "hint": "interrupt=中断整个导入/导出并缓存进度，可在传输状态区选择再次尝试或取消；skip=跳过失败条目继续（导出 mpj 时失败条目会被丢弃，仅导出成功子集）",
+            "order": 1,
+        },
+    )
+
+
 class PromptJournalConfig(PluginConfigBase):
     """麦麦的绘图笔记本配置。"""
 
@@ -379,3 +441,5 @@ class PromptJournalConfig(PluginConfigBase):
     organize_db: OrganizeDbConfig = Field(default_factory=OrganizeDbConfig)
     advanced: AdvancedConfig = Field(default_factory=AdvancedConfig)
     backup: BackupConfig = Field(default_factory=BackupConfig)
+    txt_import: TxtImportConfig = Field(default_factory=TxtImportConfig)
+    file_io: FileIOConfig = Field(default_factory=FileIOConfig)
