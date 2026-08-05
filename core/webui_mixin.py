@@ -83,6 +83,7 @@ class WebUIMixin:
             app.router.add_post("/api/export/start", self._web_export_start)
             app.router.add_get("/api/export/download", self._web_export_download)
             app.router.add_get("/api/transfer/state", self._web_transfer_state)
+            app.router.add_post("/api/transfer/clear", self._web_transfer_clear)
             app.router.add_post("/api/import/file", self._web_import_file)
             app.router.add_get("/api/import/file_preview", self._web_import_file_preview)
             app.router.add_post("/api/import/file_commit", self._web_import_file_commit)
@@ -1266,6 +1267,15 @@ class WebUIMixin:
         elif state in ("done", "error"):
             resp["result"] = self._read_io_result()
         return web.json_response(resp)
+
+    async def _web_transfer_clear(self, request: Any) -> Any:
+        """清空当前导入/导出状态（清除预览，重新开始）。"""
+        from aiohttp import web
+
+        if not self._web_check_auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        self._reset_io()
+        return web.json_response({"success": True, "state": "none"})
 
     async def _web_import_file(self, request: Any) -> Any:
         """上传 jsonl/mpj 文件并启动后台校验任务。"""

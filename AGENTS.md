@@ -230,7 +230,8 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 - `POST /api/import/file`（multipart：`file` + `sample` 抽样数）→ `_reset_io()` → `kind=import, state=validating` → 起后台校验任务。
 - 校验：jsonl 解析（`_parse_import_jsonl`：缺 id 补 `scramble_id`、缺 ts 补当前时间、坏行计入 skipped）；mpj 解包 → 校验码 → 维度（内置 embedding 探针）→ 条目数=向量数 → 维度一致时抽样（默认 25，前端可指定）用内置 embedding 重算余弦 → 平均/最小相似度。结果写 `preview.jsonl` + `preview.json`，`state=ready`。
 - **校验码**：`checksum.sha256` 缺失或对不上都视为"可能被第三方修改"，前端显示警告并要求勾选"我已了解风险"才能提交（同一警告文案）。
-- `GET /api/transfer/state`（统一状态查询，抗刷新）/ `GET /api/import/file_preview?page=&size=`（分页展示全部条目）/ `POST /api/import/file_commit`。
+- `GET /api/transfer/state`（统一状态查询，抗刷新）/ `POST /api/transfer/clear`（清除当前导入/导出状态）/ `GET /api/import/file_preview?page=&size=`（分页展示全部条目）/ `POST /api/import/file_commit`。
+- 预览确认：目标（新建/合并）+ 三个按钮 **直接导入 / 重建索引导入 / 清除**（直接导入仅 mpj 且维度/数量一致时可用；校验码异常需勾选"我已了解风险"才可点导入）。
 - 提交：jsonl / mpj-rebuild → 内置 embedding 全量建索引 → **新建或合并**（合并时重生成 id 防冲突，前端提醒去重）；mpj-direct → 保留 mpj 自带索引（仅新建，需维度一致 + 条目数=向量数）。
 - `client_max_size` 已放宽到 256MB（支持大 mpj）。
 
