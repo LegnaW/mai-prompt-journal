@@ -333,7 +333,7 @@ function pollTransferState() {
     if (data.kind === 'import') {
       if (data.state === 'validating') status.innerHTML = '<p>正在校验文件...</p>';
       else if (data.state === 'importing') status.innerHTML = '<p>正在导入...</p>';
-      else if (data.state === 'ready') renderImportPreview(data.preview || {});
+      else if (data.state === 'ready') { stopTransferPolling(); renderImportPreview(data.preview || {}); }
       else if (data.state === 'done') { stopTransferPolling(); renderTransferResult(data.result || {}); loadNotebooks(); loadStatus(); }
       else if (data.state === 'error') { stopTransferPolling(); renderTransferResult(data.result || { error: '校验或导入失败' }); }
     } else if (data.kind === 'export') {
