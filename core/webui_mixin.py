@@ -905,7 +905,7 @@ class WebUIMixin:
         self._tasks[task_id] = {
             "id": task_id,
             "type": "import",
-            "label": "txt 批量导入",
+            "label": "txt 批量写入",
             "status": STATE_INTERRUPTED,
             "progress": {
                 "total": len(segments),
@@ -1040,7 +1040,7 @@ class WebUIMixin:
                 {"error": "LLM 直连配置不完整，请填写 [llm] 的 base_url / api_key / model"}, status=400
             )
 
-        task_id = self._start_task("import", "txt 批量导入")
+        task_id = self._start_task("import", "txt 批量写入")
         if task_id is None:
             return web.json_response({"error": "已有后台任务进行中，请等待完成后再试"}, status=409)
         handle = asyncio.create_task(

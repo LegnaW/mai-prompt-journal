@@ -19,7 +19,7 @@
 
 本插件为 AI 提供"绘图提示词笔记"能力：AI 或管理员把绘图标签经验（英文 tag + 中文释义 + 备注）写入多本"笔记本"，通过向量语义检索回忆历史经验。
 
-- 4 个 LLM 工具：`add_aidraw_notes` / `read_aidraw_notes` / `modify_aidraw_note` / `delete_aidraw_note`
+- 5 个 LLM 工具：`add_aidraw_notes` / `read_aidraw_notes` / `modify_aidraw_note` / `delete_aidraw_note` / `aidraw_prompt_generate`（SubAgent 构建提示词，默认关）
 - 7 个管理员指令：`/mpj add|search|modify|delete|refresh|rebuild|help`
 - 1 个嵌入式 WebUI（aiohttp 独立端口，默认 8010，可选密码）
 - WebUI 去重功能：语义扫描 → LLM 整理（可配置任务名与系统提示词）
@@ -27,6 +27,12 @@
 
 ## 近期更新（dev 分支，未发布）
 
+- **v2.4.0：新增 `aidraw_prompt_generate` SubAgent 工具**：规划器（聊天侧）传入绘图要求，插件经 `_direct_chat` 直连 LLM 释放一个**子代理**自行检索笔记本（`search_notes`，notebook 可选手动/`all`，提示词提示优先 all），最终返回一段成品英文提示词 + 简短中文说明。**子代理的中间消息与检索结果工具返回后即丢弃，不进宿主 `_chat_history`，省上下文**。开关 `[journal].aidraw_prompt_gen_enabled`（默认关，关闭时规划器看不到该工具）、轮数 `[journal].aidraw_prompt_gen_max_iterations`（默认 4，与 WebUI organize_db 独立）、系统提示词 `[advanced].aidraw_prompt_gen_system_prompt`（空=内置默认）。实现：`core/organize_mixin.py` 的 `_run_aidraw_prompt_gen` / `_execute_search_anywhere` + `plugin.py` 的 `handle_aidraw_prompt_generate`。
+- **v2.4.0：txt 批量写入 / 导入导出的重试配置迁出配置文件**：删除 `[txt_import]` / `[file_io]` 配置节，`max_retries` / `on_failure` 改为**各 WebUI 页面在任务开始前按次配置**（txt 导入页与「导入/导出」页均有表单，默认 3 / interrupt）。中断续跑时从 `import.state.json` / `resume.json` 回读启动时的设置。`_run_import_task` / `_run_export_task` / `_run_file_commit_task` 改为接收参数；`_normalize_retry_params`（`core/export_import_mixin.py`）统一钳制（0–20、interrupt/skip）。
+- **v2.4.0：配置节重排**：`[advanced]`（高级）移至配置页**最底部**；`config_version` 升到 `2.4.0`；`normalize_plugin_config` 新增废弃节清理（`removed_sections`），`[txt_import]`/`[file_io]` 旧键升级时自动丢弃。
+- **search_notes 工具结果附带检索机会提示**：操作数据库 / SubAgent / txt 批量写入的 agent 循环里，每次 search_notes 的返回末尾追加 `_format_iteration_hint`（`core/organize_mixin.py`），告知模型当前第几轮、还剩几轮、一轮内多次检索只算 1 次机会、信息足够可提前收尾。
+- **WebUI 长程任务提示条**：`web/*.html` 中涉及长程任务（操作数据库 / txt 批量写入 / 导入导出 / 去重整理）的位置新增 `.lock-hint` 提示（`web/style.css`），提醒"期间占用写入锁、机器人对话侧 add/modify/delete 暂不可用、建议空闲时使用"；全局导航重建索引按钮 tooltip 同步提示。
+- **txt 批量写入页文案统一**：`web/import.html` / `web/import_guide.md` 中与「txt 批量写入」功能相关的"导入"全部改为"写入"（写入状况 / 写入配置 / 开始写入 / 取消写入 / 等待写入等），避免与笔记本导入功能混淆；任务中心标签同步为「txt 批量写入」。`导入oc设计` 预设名保留（与操作数据库页共享）。
 - **长程任务重试兜底 + 断点续跑**：embedding/LLM API 增加瞬时失败重试与超时（`core/retry.py`）；txt 批量写入、笔记本导入/导出支持条目级重试，失败后可「中断（缓存进度、再次尝试/取消）」或「跳过」，新增 `interrupted` 状态与磁盘续跑缓存（`core/resume.py`）。embed 进度**每 10s 周期落盘 + 原子写 + 上一份备份**，进程被强杀/断电时最多丢最后 10s 进度，重载后通过 `_effective_io_state` 呈现为可续跑的中断状态。详见下文「重试与断点续跑」章节。
 - **WebUI 活跃任务栏收起**：`injectTaskCenter` 头部新增收起/展开按钮（`toggleTaskCenter`，`web/app.js`），任务列表可折叠；`.hidden` 需 `!important` 故不受影响。
 - **导出默认格式改为 mpj**：`exportFormat` 下拉默认选中 mpj，页面加载后文件名自动填 `default.mpj`。
@@ -47,12 +53,12 @@
 | 文件 | 职责 |
 |------|------|
 | `_manifest.json` | 插件元信息 + 能力声明 + 依赖声明 |
-| `plugin.py` | 入口：插件主类 `PromptJournalPlugin`（生命周期 / 迁移 / 4 工具 / 9 指令 / 辅助）+ `create_plugin()` 工厂 |
+| `plugin.py` | 入口：插件主类 `PromptJournalPlugin`（生命周期 / 迁移 / 5 工具 / 9 指令 / 辅助）+ `create_plugin()` 工厂 |
 | `core/constants.py` | 模块常量：LLM 系统提示词、`_WRITE_TOOL_NAMES`、WebUI 阈值与警告页等 |
 | `core/config.py` | 全部配置模型（`PromptJournalConfig` 及各节） |
 | `core/notebook.py` | `Notebook` 数据模型 + `scramble_id` / `_split_txt` |
 | `core/search_mixin.py` | `SearchMixin`：向量搜索、索引重建、embedding 助手、写入去重检测 |
-| `core/organize_mixin.py` | `OrganizeMixin`：LLM 直连、去重整理、操作数据库、txt 批量写入的 agent 循环 |
+| `core/organize_mixin.py` | `OrganizeMixin`：LLM 直连、去重整理、操作数据库、txt 批量写入、SubAgent 提示词生成的 agent 循环 |
 | `core/json_utils.py` | 宽容 JSON 解析（`parse_lenient_json`：多候选提取 + strict=False/去尾逗号/非法转义/单引号修复） |
 | `core/backup_mixin.py` | `BackupMixin`：笔记本自动备份（创建/列表/恢复/删除/上限淘汰，`data_dir/backups/{name}/{时间戳}.jsonl`） |
 | `core/export_import_mixin.py` | `ExportImportMixin`：笔记本导出（jsonl/mpj）/ 文件导入（后台校验 + 提交 + 抗刷新暂存 `data_dir/file_import/`） |
@@ -249,6 +255,7 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 - **多轮会话**：`self._organize_sessions`（内存，上限 20 按 `created_at` 淘汰，`_evict_organize_sessions`）。
 - **后台任务 + 进度轮询**：`POST /api/organize_db/plan` 只做快速校验（笔记本存在/索引有效），然后 `asyncio.create_task` 跑 `_organize_db_task` 并立即返回 `{task_id}`；`GET /api/organize_db/plan_status?task_id=` 轮询进度。
   - 任务进度存在 `self._organize_tasks[task_id]`，`_run_organize_db_round` 每执行一次 search_notes 就往 `progress["searches"]` 追加 `{keyword, notebook}`（前端显示"正在检索：'x'（第 N 次）"）
+  - 每次 search_notes 的返回末尾追加 `_format_iteration_hint`（当前第几轮/还剩几轮/一轮内多次检索只算 1 次机会/信息足够可提前输出），让模型感知剩余轮数预算、避免撞 `max_iterations` 上限
   - 完成 → `{"status":"done","plan":{session_id, reason, operations}}`（operations 已在任务内富化 `_old` 当前值）；失败 → `{"status":"error","error":具体错误}`；`_evict_organize_tasks` 保留 300s 且上限 50
 - **请求体** `{notebook, requirement?, session_id?}`：
   - 无 `session_id` → 新建会话跑初始轮；有 → 校验会话/notebook/非空补充后追加 user 消息重跑**覆盖**上一轮
@@ -258,15 +265,26 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 - `POST /api/organize_db/apply` 成功后清除对应 `session_id` 会话。
 - 前端对话框内：方案预览（每条操作独立元素 + 复选框默认全选，按类型配色：新增浅绿/修改浅蓝/删除浅红）+ [补充要求输入框 + 追加要求] + [执行已选] + [全选/全不选] + [清除]，每轮刷新只显示最新方案。`renderOrganizeDbPlan` 用 `data-idx` 记录操作索引，`doOrganizeDbApply` 只提交勾选的 operations 子集。
 
+## aidraw_prompt_generate（SubAgent 提示词生成，聊天侧工具）
+
+给规划器用的第 5 个 LLM 工具（`plugin.py` 的 `handle_aidraw_prompt_generate`，`@Tool("aidraw_prompt_generate")`）。规划器传入绘图要求，插件释放一个**子代理**自行检索笔记本、生成成品英文提示词 + 简短中文说明返回；子代理的中间消息与检索结果**工具返回后即丢弃，不进宿主 `_chat_history`**，比规划器自己逐条 `read_aidraw_notes` 更省上下文。
+
+- **开关**：`[journal].aidraw_prompt_gen_enabled`（默认 **false**）。关闭时经 `_apply_tool_states`（`plugin.py`，由原 `_apply_write_tools_state` 扩展）`disable_component`，**规划器根本看不到该工具**；开启时 `enable_component`。需配置 `[llm]` 直连。
+- **轮数**：`[journal].aidraw_prompt_gen_max_iterations`（默认 4，ge=1 le=30），**与 WebUI organize_db 的 `max_iterations` 完全独立**。
+- **系统提示词**：`[advanced].aidraw_prompt_gen_system_prompt`（空=内置默认 `_AIDRAW_PROMPT_GEN_DEFAULT_SYSTEM_PROMPT`，`core/constants.py`），强调优先 `search_notes(notebook="all")` 多角度检索、输出「提示词：… / 说明：…」格式、不臆造、客观处理敏感主题。
+- **子代理循环**：`_run_aidraw_prompt_gen`（`core/organize_mixin.py`）镜像 `_run_organize_db_round` —— `for i in range(max_iterations)` 调 `_direct_chat(messages, tools=[_ORGANIZE_DB_SEARCH_TOOL])`，tool_calls 回传含 `reasoning_content` + `function.arguments` 还原为 JSON 字符串；无 tool_calls 时把最终 `content` **按纯文本返回**（非 JSON），仅剥首尾代码围栏（`_strip_code_fence`）；空内容/撞轮数上限返回错误。
+- **检索调度**：`_execute_search_anywhere(keyword, notebook, limit)` —— notebook 为空或 `all` → `_search_all_notebooks`；否则单笔记本 `_search_single_notebook`。**每次调用独立持 `self._lock`**（对齐 `handle_read_notes` 粒度），`_direct_chat` 不持锁，避免子代理多轮 LLM 调用长时间阻塞其他会话。
+- **返回值**：`{"name": "aidraw_prompt_generate", "content": "提示词：…\n说明：…"}`；失败返回简短错误 + "可改用 read_aidraw_notes 自行检索"。**只读**，不入 `_WRITE_TOOL_NAMES`（不受 `allow_write` 控制），不触发备份。
+
 ## txt 批量写入（WebUI 功能）
 
 把一份 txt 按段落批量交给 LLM 处理，写入临时笔记本，完成后可查看/编辑/处置。
 
 - **切分**：`_split_txt`（模块级函数）按两个及以上连续换行（`\n{2,}`）切分，段首尾 strip，忽略空段，单段也能导入。
 - **临时笔记本**：固定名 `tmp`，文件在 `data_dir/tmp_import/`（`tmp.jsonl` / `tmp.cache.jsonl` / `tmp.embeddings.npy` / `tmp.index.meta` / `import.log`），用 `Notebook("tmp", data_dir, custom_dir=tmp_import_dir)` 构造，**不参与** `_discover_notebooks`（但 `_get_notebook("tmp")` 返回它，供 `/api/modify`、`/api/delete` 编辑临时条目）。一轮完成后**不清理**；下一轮导入开始前 `_reset_tmp_import()` 清空。
-- **一段一完整循环**：`_run_import_segment` 对每段独立跑 agent 循环（多轮 search_notes），搜索范围 = 用户选择的引用笔记本 + 临时笔记本（`_execute_search_notes_multi`）；系统提示词 = `advanced.organize_db_system_prompt` + `\n` + `advanced.batch_import_prompt`（`{temp-journal}` 替换为 `tmp`，约束 LLM 只能改临时笔记本）；输出完整 create/update/delete，`_apply_ops_to_tmp` 应用后 `_rebuild_notebook(tmp)` 增量重建，下一段可见。
+- **一段一完整循环**：`_run_import_segment` 对每段独立跑 agent 循环（多轮 search_notes），搜索范围 = 用户选择的引用笔记本 + 临时笔记本（`_execute_search_notes_multi`）；系统提示词 = `advanced.organize_db_system_prompt` + `\n` + `advanced.batch_import_prompt`（`{temp-journal}` 替换为 `tmp`，约束 LLM 只能改临时笔记本）；输出完整 create/update/delete，`_apply_ops_to_tmp` 应用后 `_rebuild_notebook(tmp)` 增量重建，下一段可见。每轮 search_notes 返回末尾同样追加 `_format_iteration_hint`。
 - **模式（附加提示词）是纯前端**：`web/import.html` 五模式单选（学习描述方式/导入oc设计/提取动作模板/提取服饰穿搭/自定义），预设直接发对应 `IMPORT_MODE_PROMPTS` 文本，自定义弹窗输入；`POST /api/import/start` 的 `mode_prompt` 字段后端仅校验非空（双重校验）。
-- **失败处理**：某段 LLM 调用/解析/写入失败 → 按 `[txt_import].max_retries` 重试；仍失败按 `[txt_import].on_failure`：`skip`=跳过该段记录到 result.failed 继续下一段；`interrupt`=缓存 `tmp_import/import.state.json` 并置任务为中断（导入页「再次尝试/取消」，跨插件重载可恢复）。导入完成后把失败汇总追加到 `import.log` 末尾。
+- **失败处理**：某段 LLM 调用/解析/写入失败 → 按 `max_retries` 重试；仍失败按 `on_failure`：`skip`=跳过该段记录到 result.failed 继续下一段；`interrupt`=缓存 `tmp_import/import.state.json` 并置任务为中断（导入页「再次尝试/取消」，跨插件重载可恢复）。导入完成后把失败汇总追加到 `import.log` 末尾。**`max_retries` / `on_failure` 在导入页「失败处理」表单按次配置**（默认 3 / interrupt，已从 `[txt_import]` 配置节迁出），续跑时从 state 回读启动时的设置。
 - **日志**：`import.log` 记录每段时间、用户输入、附加提示词、LLM 决定与理由（reason + operations）、成功/失败。
 - **处置**（`POST /api/import/resolve`）：`merge` 合并入已有笔记本（复用 tmp 向量直接追加）、`create` 新建笔记本（复制 tmp 四文件到 `imports/{new_name}.jsonl`，`_discover_notebooks` 自动发现）、`discard` 丢弃（仅清空状态，文件留给下一轮清理）。
 - **API**：`POST /api/import/preview`（切分预览）/ `POST /api/import/start` / `GET /api/import/status` / `GET /api/import/tmp_notes` / `GET /api/import/log` / `POST /api/import/resolve`。
@@ -294,7 +312,7 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 - **校验码**：`checksum.sha256` 缺失或对不上都视为"可能被第三方修改"，前端显示警告并要求勾选"我已了解风险"才能提交（同一警告文案）。
 - **抽样相似度警告**：`renderImportPreview` 中抽样**最小相似度 < 0.95** 时数值红色加粗，并追加红底提示「你的 embedding 极可能和文件导出者用的不一致，请重建索引导入」（阈值仅前端）。
 - 预览：新笔记本名称**默认取上传文件名**（去扩展名，输入框在预览面板）；目标（新建/合并）+ 按钮 **直接导入（仅 mpj 且维度/数量一致时显示）/ 重建索引导入 / 清除**（校验码异常需勾选"我已了解风险"才可点导入）。
-- 提交：jsonl / mpj-rebuild → 内置 embedding 全量建索引 → **新建或合并**（合并时重生成 id 防冲突，前端提醒去重）；mpj-direct → 保留 mpj 自带索引（仅新建，需维度一致 + 条目数=向量数）。条目 embed 失败按 `[file_io].max_retries` 重试，仍失败按 `[file_io].on_failure`：`skip`=跳过失败条目导入成功子集；`interrupt`=缓存 `file_io/resume.json` + `partial_emb.npz` 并置传输状态为中断（「再次尝试」从断点续算，不重复 embed 已完成条目）。
+- 提交：jsonl / mpj-rebuild → 内置 embedding 全量建索引 → **新建或合并**（合并时重生成 id 防冲突，前端提醒去重）；mpj-direct → 保留 mpj 自带索引（仅新建，需维度一致 + 条目数=向量数）。条目 embed 失败按 `max_retries` 重试，仍失败按 `on_failure`：`skip`=跳过失败条目导入成功子集；`interrupt`=缓存 `file_io/resume.json` + `partial_emb.npz` 并置传输状态为中断（「再次尝试」从断点续算，不重复 embed 已完成条目）。**`max_retries` / `on_failure` 在「导入/导出」页「失败处理」表单按次配置**（默认 3 / interrupt，已从 `[file_io]` 配置节迁出），续跑时从 `resume.json` 回读启动时的设置。
 - **进度与取消**：`file_io/progress.json` 由 `_write_io_progress` 写入（phase/done/total；导入用 `_embed_with_progress` 信号量并发逐条 embed，并发取 `config.journal.embed_max_concurrent`；mpj 校验抽样逐条）；前端状态元素显示 `(xx/xx)` + **取消按钮**（`POST /api/transfer/cancel` → `_cancel_running_task()` + `_reset_io()`）；中断状态可用 `POST /api/transfer/resume` 续跑。
 - 端点：`GET /api/transfer/state`（统一状态+进度，抗刷新）/ `POST /api/transfer/clear` / `POST /api/transfer/cancel` / `POST /api/transfer/resume` / `GET /api/import/file_preview?page=&size=` / `POST /api/import/file_commit`。
 - `client_max_size` 已放宽到 256MB（支持大 mpj）。
@@ -306,31 +324,32 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 - 备份功能已并入 `web/notebooks.html`「笔记本管理」选项卡（独立 `web/backups.html` 已删除，`/api/backups/*` 接口保留）。
 - 传输状态机细节：`_reset_io()` 清空 `file_io/`（含 preview/artifact/progress）；任务互斥走 `_start_task`（占用即 409）。
 
-## 配置节布局与版本迁移（v2.3.1）
+## 配置节布局与版本迁移（v2.4.0）
 
-**当前配置节顺序**（`core/config.py` 的 `__ui_order__`）：
+**当前配置节顺序**（`core/config.py` 的 `__ui_order__`，`[advanced]` 始终在最底部）：
 
 | 顺序 | 节 | 内容 |
 |------|-----|------|
-| 0 | `[plugin]` | 开关 / `config_version`（当前 `2.3.1`） |
-| 1 | `[journal]` | 搜索条数 / 阈值 / embed 并发 / allow_write / 写入去重检测 |
+| 0 | `[plugin]` | 开关 / `config_version`（当前 `2.4.0`） |
+| 1 | `[journal]` | 搜索条数 / 阈值 / embed 并发 / allow_write / 写入去重检测 / SubAgent 提示词开关与轮数 |
 | 2 | `[admin]` | 管理员 QQ |
 | 3 | `[web]` | WebUI 开关 / 端口 / 密码 / bind |
 | 4 | `[llm]` | LLM 直连（base_url / api_key / model / ...） |
 | 5 | `[dedup_merge]` | 去重整理开关（系统提示词已迁到 `[advanced]`） |
 | 6 | `[organize_db]` | 操作数据库开关 / 轮数 / 条数 |
-| 7 | `[advanced]` | **高级**：`dedup_merge_system_prompt` / `organize_db_system_prompt` / `batch_import_prompt` / `dedup_scan_block`（默认不建议改） |
-| 8 | `[backup]` | 备份：`enabled`（默认 true）/ `max_per_notebook`（默认 6） |
-| 9 | `[txt_import]` | txt 批量写入重试：`max_retries`（默认 3）/ `on_failure`（interrupt/skip，默认 interrupt） |
-| 10 | `[file_io]` | 导入/导出重试：`max_retries`（默认 3）/ `on_failure`（interrupt/skip，默认 interrupt） |
+| 7 | `[backup]` | 备份：`enabled`（默认 true）/ `max_per_notebook`（默认 6） |
+| 8 | `[advanced]` | **高级**（最后）：`dedup_merge_system_prompt` / `organize_db_system_prompt` / `batch_import_prompt` / `aidraw_prompt_gen_system_prompt` / `dedup_scan_block`（默认不建议改） |
+
+> 注：`[txt_import]` / `[file_io]` 配置节已在本版**删除**，重试配置迁移到各 WebUI 页面按任务配置（见「重试与断点续跑」）。
 
 **配置迁移机制（重要，勿破坏）**：
 - host 在 `config_version` **升高**时，以最新默认配置为骨架重建并写回文件（runner_main `_prepare_plugin_config_for_version_update`）；键路径不变的旧值自动保留，**被删除的键值会在进入钩子前被丢弃**。
 - 插件主类实现了 `normalize_plugin_config`（`plugin.py`），负责"跨节搬字段 + 删旧键"，当前迁移对：
   `dedup_merge.system_prompt → advanced.dedup_merge_system_prompt`、`organize_db.system_prompt → advanced.organize_db_system_prompt`、`organize_db.batch_import_prompt → advanced.batch_import_prompt`、`journal.dedup_scan_block → advanced.dedup_scan_block`。
+- **废弃整节清理**：`normalize_plugin_config` 的 `removed_sections = ["txt_import", "file_io"]` 会在进入钩子时（以及基类重建后）把这两节从配置里删除并置 `changed=True`。
 - **两阶段迁移惯例**：搬字段时，旧字段先在模型里保留并标 `json_schema_extra={"hidden": True}`（WebUI 自动隐藏），配合钩子把旧值搬进新节并删除旧键；下一版本再删掉废弃 hidden 字段并再次 bump `config_version`。
 - **规则**：只加字段 → 可 bump 可不 bump；删字段 / 搬字段 / 改键路径 → **必须 bump `config_version`**，否则旧值会在重建时被静默丢弃。
-- 部署升级验证：插件重载后检查 `config.toml` 是否生成 `[advanced]`、旧节字段是否清理、版本是否自动升到 `2.3.1`。
+- 部署升级验证：插件重载后检查 `config.toml` 是否生成 `[advanced]`、旧节字段是否清理、`[txt_import]`/`[file_io]` 是否移除、版本是否自动升到 `2.4.0`。
 
 ## 命令规范
 
@@ -358,7 +377,7 @@ txt 批量写入、笔记本导入/导出）共两层兜底，**改动时勿破�
   （1s/2s/4s），**只对瞬时失败重试**（`is_transient_error`：超时/网络/429/5xx 等，
   5xx 需带上下文如 `(503)`/`status=503`，避免误匹配向量维度数字）；业务错误不重试。
 - `run_task_item`：任务"条目级"重试，**不论是否瞬时**都重试 max_retries 次
-  （对应 `[txt_import]` / `[file_io]` 的 `max_retries`，0 表示只尝试一次）。
+  （对应各 WebUI 页面按次配置的 `max_retries`，0 表示只尝试一次）。
 - 接线位置：
   - `_embed_single`（`search_mixin.py`）：补 `_API_EMBED_TIMEOUT=60s` 超时
     （现状宿主 `ctx.llm.embed` 无超时，宿主卡住会永久挂起）+ 瞬时重试。
@@ -367,8 +386,10 @@ txt 批量写入、笔记本导入/导出）共两层兜底，**改动时勿破�
   - `EmbeddingClient.embed`（`embedding_client.py`）：瞬时重试。
 
 ### 第 2 层：任务级「中断 / 跳过」+ 断点续跑（`core/resume.py`）
-- 配置：`[txt_import]`（txt 段）与 `[file_io]`（导入导出条目）各有一组
-  `max_retries`（默认 3）与 `on_failure`（`interrupt`/`skip`，默认 `interrupt`）。
+- 配置：`max_retries`（默认 3）与 `on_failure`（`interrupt`/`skip`，默认 `interrupt`）
+  已从配置文件迁出，改由**各 WebUI 页面在任务开始前按次配置**（txt 批量写入页 /
+  「导入/导出」页的「失败处理」表单）；任务启动时经 `_normalize_retry_params`
+  （`core/export_import_mixin.py`）钳制（0–20 / interrupt|skip）。
 - 条目仍失败后：
   - `interrupt`：保存续跑上下文到**磁盘**，任务置 `interrupted`；用户可选「再次尝试」
     或「取消」。**磁盘缓存可跨插件重载恢复**。
@@ -376,9 +397,10 @@ txt 批量写入、笔记本导入/导出）共两层兜底，**改动时勿破�
     只导出成功子集，日志会提示丢弃数量）。
 - **中断缓存位置**：
   - txt 批量写入：`tmp_import/import.state.json`（segments + mode_prompt + ref_names +
-    current_index + segment_status + failed）。
-  - 导入/导出：`file_io/resume.json`（任务上下文）+ `file_io/partial_emb.npz`
-    （已完成条目的索引与向量）。「再次尝试」读缓存续算，**不重复 embed 已完成的条目**。
+    current_index + segment_status + failed + **max_retries/on_failure**，续跑沿用启动时的设置）。
+  - 导入/导出：`file_io/resume.json`（任务上下文 + **max_retries/on_failure**）+
+    `file_io/partial_emb.npz`（已完成条目的索引与向量）。「再次尝试」读缓存续算，
+    **不重复 embed 已完成的条目**。
 - **周期落盘 + 崩溃容错（重要）**：
   - embed 循环（`_embed_with_progress` / `_export_mpj_rebuild`）用
     `_run_with_periodic_flush` 每 `_PROGRESS_FLUSH_INTERVAL=10s` 把已完成进度写盘一次，
@@ -506,12 +528,12 @@ schema = generate_plugin_config_schema(m.PromptJournalConfig)
 - 修改搜索、去重、重建逻辑时注意 `self._lock` 并发保护
 - **笔记 tag 组合数量（3~10）出现在三处，改动必须同步**：`add_aidraw_notes` 工具描述（`plugin.py`）、`web/organize.html` 与 `web/import.html` 的 `learn_style` 预设
 - **`_scan_duplicates` 必须保持分块计算**（`_DEDUP_SCAN_BLOCK`，B×N 用完即弃），不要改回一次性 N×N 矩阵——大笔记本会 OOM
-- **`[journal] allow_write`**：只读模式开关。`_apply_write_tools_state()` 用 `ctx.component.disable/enable_component(name, "tool", scope="global")` 控制 `_WRITE_TOOL_NAMES`（add/modify/delete）三个工具的启停；`on_load` 与 `on_config_update(scope="self")` 都会应用（WebUI 改配置即时生效）。manifest 需声明 `component.disable`/`component.enable`。只影响 LLM 工具，管理员 `/mpj` 命令与 WebUI 不受影响
+- **`[journal] allow_write` / `aidraw_prompt_gen_enabled`**：`_apply_tool_states()`（`plugin.py`，由原 `_apply_write_tools_state` 扩展）用 `ctx.component.disable/enable_component(name, "tool", scope="global")` 控制 `_WRITE_TOOL_NAMES`（add/modify/delete）与 `aidraw_prompt_generate` 的启停；`on_load` 与 `on_config_update(scope="self")` 都会应用（WebUI 改配置即时生效）。manifest 需声明 `component.disable`/`component.enable`。只影响 LLM 工具，管理员 `/mpj` 命令与 WebUI 不受影响
 - **去重 resolve 不要改回"手工改向量"**：一律走"只写源文件 → `_rebuild_notebook` → `_scan_duplicates`"（见"去重与 LLM 整理"）
 - **LLM 生成走 `_direct_chat`，不要改回 `ctx.llm.generate`**；新增 `ctx.*` 调用记得同步 `_manifest.json` 能力声明（当前仅 `llm.embed` + `send.text`）
 - 修改 `_direct_chat` / agent 循环时注意 **`reasoning_content` 回传** 与 **`tool_calls[].function.arguments` 是 JSON 字符串需 `json.loads`** 两个要点（见"LLM 生成统一走直连 API"）
 - 改配置模型字段时，若只是加 `json_schema_extra` 元数据，**无需 bump `config_version`**（config.toml 里值不变）
-- `[dedup_merge]` / `[organize_db]` / `[advanced]` / `[llm]` 配置改动需重启插件生效（`self.config` 加载时读取，无热更新）
+- `[dedup_merge]` / `[organize_db]` / `[advanced]` / `[llm]` 配置改动需重启插件生效（`self.config` 加载时读取，无热更新）；`[journal]` 的 `allow_write` / `aidraw_prompt_gen_enabled` 经 `_apply_tool_states` 在 `on_config_update(scope="self")` 即时生效，其余 `[journal]` 字段仍重启生效
 - 改 `_manifest.json` capabilities 后必须**重载插件**才会重新注册能力令牌（否则 E_CAPABILITY_DENIED）
 - **API 重试分层勿破坏**：第 1 层 `run_with_retry`（单次调用、仅瞬时失败）与第 2 层 `run_task_item`（条目级、任意失败都重试）语义不同；5xx 判定需带上下文（`(503)`/`status=503`），**不要改回裸 `\b5\d\d\b`**（会误匹配向量维度数字）
 - **中断续跑缓存是磁盘真相**：`tmp_import/import.state.json`、`file_io/resume.json` + `file_io/partial_emb.npz`（及 `.bak`）是"再次尝试"的唯一依据；`_reset_tmp_import()` / `_reset_io()` 会清掉它们（= 取消）。改动重置逻辑时勿漏

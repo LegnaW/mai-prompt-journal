@@ -12,7 +12,7 @@
 
   <div class="card" id="importStatusCard">
     <div class="row" style="justify-content: space-between; margin-bottom: 8px;">
-      <strong>导入状况</strong>
+      <strong>写入状况</strong>
     </div>
     <div id="importStatusBody" style="font-size:14px;"></div>
   </div>
@@ -22,7 +22,7 @@
       <strong>txt 批量写入</strong>
     </div>
 
-    <div class="lock-hint">⚠️ 长程任务提示：开始导入后，整个导入过程会占用笔记本写入锁，机器人对话侧的 add / modify / delete 工具将暂时不可用，建议在机器人空闲时使用。</div>
+    <div class="lock-hint">⚠️ 长程任务提示：开始写入后，整个写入过程会占用笔记本写入锁，机器人对话侧的 add / modify / delete 工具将暂时不可用，建议在机器人空闲时使用。</div>
 
     <div style="margin-bottom: 12px;">
       <div id="importDropZone" style="border:2px dashed #4f9afe;border-radius:10px;padding:36px 16px;text-align:center;cursor:pointer;background:#f5f9ff;transition:background 0.2s;"
@@ -39,7 +39,7 @@
 
   <div class="card" id="importConfigCard">
     <div class="row" style="justify-content: space-between; margin-bottom: 8px;">
-      <strong>导入配置</strong>
+      <strong>写入配置</strong>
     </div>
     <div style="margin-bottom: 12px;">
       <div class="row" style="margin-bottom: 4px;">
@@ -50,7 +50,7 @@
         <label><input type="radio" name="importMode" value="outfit_template" onchange="syncImportModePrompt()"> 提取服饰穿搭</label>
         <label><input type="radio" name="importMode" value="custom" checked onchange="syncImportModePrompt()"> 自定义</label>
       </div>
-      <div style="font-size:12px;color:#999;">选择预设模式时附加提示词自动锁定为对应预设，无法修改；选择"自定义"时可编辑。附加提示词将作用于整次导入的所有段落。</div>
+      <div style="font-size:12px;color:#999;">选择预设模式时附加提示词自动锁定为对应预设，无法修改；选择"自定义"时可编辑。附加提示词将作用于整次写入的所有段落。</div>
       <div style="margin-top:8px;">
         <label style="display:block; margin-bottom:4px;">附加提示词:</label>
         <textarea id="importCustomPrompt" rows="3" placeholder="选择自定义模式后在此输入你的附加提示词"></textarea>
@@ -63,7 +63,7 @@
       </div>
     </div>
     <div style="margin-bottom: 12px;">
-      <div style="font-size:12px;color:#999;margin-bottom:4px;">失败处理（本次导入生效）:</div>
+      <div style="font-size:12px;color:#999;margin-bottom:4px;">失败处理（本次写入生效）:</div>
       <div class="row" style="gap:16px;flex-wrap:wrap;">
         <label>重试次数
           <input type="number" id="importMaxRetries" value="3" min="0" max="20" style="width:70px;">
@@ -73,7 +73,7 @@
       </div>
     </div>
     <div class="row">
-      <button class="btn btn-success" id="importStartBtn" onclick="doStartImport()">开始导入</button>
+      <button class="btn btn-success" id="importStartBtn" onclick="doStartImport()">开始写入</button>
     </div>
     <div id="importProgress" style="margin-top:10px;"></div>
   </div>
@@ -232,7 +232,7 @@ function doStartImport() {
       on_failure: onFailureEl ? onFailureEl.value : 'interrupt',
     };
     const prog = document.getElementById('importProgress');
-    prog.innerHTML = '<p style="color:#999">提交导入任务中...</p>';
+    prog.innerHTML = '<p style="color:#999">提交写入任务中...</p>';
     api('POST', '/api/import/start', payload).then(data => {
       if (data.error) { prog.innerHTML = `<p style="color:#c62828">${esc(data.error)}</p>`; return; }
       importTaskId = data.task_id || null;
@@ -247,7 +247,7 @@ function doStartImport() {
   reader.readAsText(file, 'utf-8');
 }
 
-// ============ 导入状况状态机 ============
+// ============ 写入状况状态机 ============
 
 function setImportDisabled(disabled) {
   const zone = document.getElementById('importDropZone');
@@ -293,17 +293,17 @@ function renderImportStatus(state) {
     const done = p.done || 0;
     const failedCount = state.failed_count || 0;
     html = `<div>
-      <div style="color:#8d6e63;"><strong>笔记本构建中</strong>：正在逐段导入，请稍候。</div>
+      <div style="color:#8d6e63;"><strong>笔记本构建中</strong>：正在逐段写入，请稍候。</div>
       <div style="margin-top:8px;color:#8d6e63;">段 ${p.current_index || 1}/${total}（已完成 ${done}/${total}）${failedCount ? `，已失败 <span style="color:#c62828">${failedCount}</span> 段` : ''}</div>
       <div class="row" style="margin-top:10px;">
-        <button class="btn btn-danger btn-sm" onclick="doCancelImport()">取消导入</button>
+        <button class="btn btn-danger btn-sm" onclick="doCancelImport()">取消写入</button>
       </div>
     </div>`;
   } else if (state.state === 'ready') {
     card.style.background = '#e3f2fd';
     const failedCount = state.failed_count || 0;
     html = `<div>
-      <div style="color:#1565c0;"><strong>构建完毕，等待导入</strong>：共 ${state.total} 条笔记${failedCount ? `，失败 <span style="color:#c62828">${failedCount}</span> 段` : ''}。</div>
+      <div style="color:#1565c0;"><strong>构建完毕，等待写入</strong>：共 ${state.total} 条笔记${failedCount ? `，失败 <span style="color:#c62828">${failedCount}</span> 段` : ''}。</div>
       <div style="margin-top:10px;border:1px solid #90caf9;border-radius:8px;background:#f5fbff;">
         <div class="row" style="justify-content: space-between; padding:8px 10px;">
           <span style="font-size:14px;color:#1565c0;"><strong>临时笔记本</strong>（${state.total} 条）</span>
@@ -334,7 +334,7 @@ function renderImportStatus(state) {
     </div>`;
   } else if (state.state === 'done') {
     card.style.background = '#e8f5e9';
-    html = `<div style="color:#2e7d32;"><strong>已完成</strong>：本次导入已结束，可导入新的 txt 文件。</div>`;
+    html = `<div style="color:#2e7d32;"><strong>已完成</strong>：本次写入已结束，可写入新的 txt 文件。</div>`;
   } else if (state.state === 'interrupted') {
     card.style.background = '#fff3e0';
     const p = state.progress || {};
@@ -350,14 +350,14 @@ function renderImportStatus(state) {
     </div>`;
   } else {
     card.style.background = '#f5f5f5';
-    html = `<div style="color:#888;">尚未开始：请上传一份 txt 以开始导入。</div>`;
+    html = `<div style="color:#888;">尚未开始：请上传一份 txt 以开始写入。</div>`;
   }
   body.innerHTML = html;
 }
 
 function doResumeImport(taskId) {
   if (!taskId) { alert('任务 ID 缺失，请刷新页面后重试'); return; }
-  if (!confirm('确认从断点继续导入？已完成段保留，未完成段重新处理。')) return;
+  if (!confirm('确认从断点继续写入？已完成段保留，未完成段重新处理。')) return;
   api('POST', '/api/task/resume', { task_id: taskId }).then(data => {
     if (data.error) { alert(data.error); return; }
     importTaskId = taskId;
@@ -392,7 +392,7 @@ function refreshImportState() {
 }
 
 function doCancelImport() {
-  if (!confirm('确认取消本次导入并清空缓存？已导入的段落将被丢弃。')) return;
+  if (!confirm('确认取消本次写入并清空缓存？已写入的段落将被丢弃。')) return;
   api('POST', '/api/import/cancel').then(data => {
     if (data.error) { alert(data.error); return; }
     importTaskId = null;
