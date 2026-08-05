@@ -62,3 +62,15 @@ textarea::placeholder { color: #bbb; }
 .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
 .two-col .col { background: #fafbfc; border: 1px solid #eee; border-radius: 8px; padding: 12px; }
 @media (max-width: 700px) { .two-col { grid-template-columns: 1fr; } }
+
+/* 长程任务提示：会占用笔记本写入锁，机器人对话侧 add/modify/delete 工具暂不可用 */
+.lock-hint {
+  margin: 10px 0;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #8d6e63;
+  background: #fff8e1;
+  border: 1px solid #ffe082;
+}

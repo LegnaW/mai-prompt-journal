@@ -1016,6 +1016,9 @@ class WebUIMixin:
         if not isinstance(ref_raw, list):
             ref_raw = []
         ref_names = [str(n or "").strip() for n in ref_raw if str(n or "").strip()]
+        max_retries, on_failure = self._normalize_retry_params(
+            body.get("max_retries"), body.get("on_failure")
+        )
 
         segments = _split_txt(text)
         if not segments:
@@ -1040,7 +1043,11 @@ class WebUIMixin:
         task_id = self._start_task("import", "txt 批量导入")
         if task_id is None:
             return web.json_response({"error": "已有后台任务进行中，请等待完成后再试"}, status=409)
-        handle = asyncio.create_task(self._run_import_task(task_id, segments, mode_prompt, ref_names))
+        handle = asyncio.create_task(
+            self._run_import_task(
+                task_id, segments, mode_prompt, ref_names, max_retries=max_retries, on_failure=on_failure
+            )
+        )
         if self._tasks.get(task_id) is not None:
             self._tasks[task_id]["handle"] = handle
         return web.json_response({"task_id": task_id, "count": len(segments)})
@@ -1409,6 +1416,9 @@ class WebUIMixin:
         fmt = str(body.get("format", "") or "").strip() or "jsonl"
         mode = str(body.get("mode", "") or "").strip() or "direct"
         filename = str(body.get("filename", "") or "").strip()
+        max_retries, on_failure = self._normalize_retry_params(
+            body.get("max_retries"), body.get("on_failure")
+        )
         if "/" in filename or "\\" in filename or not filename:
             filename = f"{nb_name}.{fmt}"
 
@@ -1421,7 +1431,11 @@ class WebUIMixin:
             return web.json_response({"error": "已有后台任务进行中，请等待完成后再试"}, status=409)
         self._reset_io()
         self._set_io("export", "building")
-        handle = asyncio.create_task(self._run_export_task(task_id, nb_name, fmt, mode, filename))
+        handle = asyncio.create_task(
+            self._run_export_task(
+                task_id, nb_name, fmt, mode, filename, max_retries=max_retries, on_failure=on_failure
+            )
+        )
         if self._tasks.get(task_id) is not None:
             self._tasks[task_id]["handle"] = handle
         return web.json_response({"task_id": task_id, "kind": "export", "state": "building"})
@@ -1642,6 +1656,9 @@ class WebUIMixin:
         target_name = str(body.get("target_name", "") or "").strip()
         mode = str(body.get("mode", "") or "").strip() or "rebuild"
         merge_target = str(body.get("merge_target", "") or "").strip()
+        max_retries, on_failure = self._normalize_retry_params(
+            body.get("max_retries"), body.get("on_failure")
+        )
 
         if merge_target:
             target_name = merge_target
@@ -1652,7 +1669,11 @@ class WebUIMixin:
         if task_id is None:
             return web.json_response({"error": "已有后台任务进行中，请等待完成后再试"}, status=409)
         self._set_io("import", "importing")
-        handle = asyncio.create_task(self._run_file_commit_task(task_id, target_name, mode, merge_target))
+        handle = asyncio.create_task(
+            self._run_file_commit_task(
+                task_id, target_name, mode, merge_target, max_retries=max_retries, on_failure=on_failure
+            )
+        )
         if self._tasks.get(task_id) is not None:
             self._tasks[task_id]["handle"] = handle
         return web.json_response({"task_id": task_id, "kind": "import", "state": "importing"})

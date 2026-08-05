@@ -8,6 +8,7 @@ from typing import Any
 import aiohttp
 
 from .constants import (
+    _AIDRAW_PROMPT_GEN_DEFAULT_SYSTEM_PROMPT,
     _DEDUP_MERGE_DEFAULT_SYSTEM_PROMPT,
     _ORGANIZE_DB_DEFAULT_SYSTEM_PROMPT,
     _ORGANIZE_DB_SEARCH_TOOL,
@@ -29,6 +30,37 @@ def _format_json_parse_error(reason: str | None, response_text: str) -> str:
     """把解析失败原因格式化为给用户/日志的中文提示。"""
     hint = _JSON_PARSE_HINTS.get(reason or "", "LLM 返回内容无法解析为 JSON")
     return f"{hint}，完整输出：\n{response_text}"
+
+
+def _format_iteration_hint(used: int, total: int, remaining: int) -> str:
+    """构造追加到 search_notes 工具返回值里的检索机会提示。
+
+    循环预算按『轮』计数：一轮内连续多次调用工具只消耗 1 次机会（检索比对话轮次快得多），
+    因此提示鼓励模型在同一轮内多角度检索，信息足够后直接输出最终结果，无需把机会用完。
+    """
+    if remaining <= 0:
+        return (
+            f"【检索机会提示】当前为第 {used}/{total} 轮，本轮结束后已无剩余检索轮次，"
+            "请在本次调用结束后直接输出最终结果，不要再发起新的检索轮次。"
+        )
+    return (
+        f"【检索机会提示】当前为第 {used}/{total} 轮，本轮结束后还剩 {remaining} 轮机会。"
+        "同一轮内可连续调用多次 search_notes 工具，多次检索只消耗本轮 1 次机会（检索比对话轮次快得多）。"
+        "若已检索到足够信息，请直接输出最终结果，无需把机会用完。"
+    )
+
+
+def _strip_code_fence(text: str) -> str:
+    """去掉首尾的 ``` 代码围栏及语言标记（模型偶发输出），返回正文文本。"""
+    stripped = str(text or "").strip()
+    if not (stripped.startswith("```") and stripped.endswith("```")):
+        return stripped
+    body = stripped[3:-3].strip()
+    lines = body.split("\n")
+    if lines and lines[0].strip() and " " not in lines[0].strip() and len(lines[0].strip()) <= 20:
+        lines = lines[1:]
+    return "\n".join(lines).strip()
+
 
 class OrganizeMixin:
 
@@ -276,6 +308,121 @@ class OrganizeMixin:
             )
         return "\n".join(lines)
 
+    async def _execute_search_anywhere(self, keyword: str, notebook_name: str = "", limit: int = 10) -> str:
+        """按关键词检索，支持 notebook='all' 跨全部笔记本（aidraw_prompt_generate 子代理用）。
+
+        与 _execute_search_notes 不同：本方法每次调用独立持锁（子代理循环本身不持锁，
+        避免多轮 LLM 调用长时间阻塞其他会话）。
+        """
+        keyword = str(keyword or "").strip()
+        if not keyword:
+            return "检索失败：关键词不能为空"
+        nb_name = str(notebook_name or "").strip()
+        top_k = max(1, min(50, int(limit or 10)))
+        min_score = float(self.config.journal.min_score)
+
+        async with self._lock:
+            query_vec = await self._embed_single(keyword)
+            if query_vec is None:
+                return "检索失败：embedding 服务不可用"
+
+            if not nb_name or nb_name == "all":
+                results = await self._search_all_notebooks(keyword, query_vec, top_k, min_score)
+            else:
+                nb = self._get_notebook(nb_name)
+                if nb is None:
+                    return f"笔记本 '{nb_name}' 不存在"
+                results = await self._search_single_notebook(nb, keyword, query_vec, top_k, min_score)
+
+            if not results:
+                return "未找到相关笔记"
+            lines = [f"找到 {len(results)} 条相关笔记："]
+            for i, r in enumerate(results, 1):
+                note_part = f" — {r['note']}" if r.get("note") else ""
+                lines.append(
+                    f'{i}. 来自笔记本:{r["notebook"]} 笔记ID:{r["id"]} '
+                    f'{r["en"]} / {r["zh"]}{note_part} (相似度: {r["score"]:.2f})'
+                )
+            return "\n".join(lines)
+
+    async def _run_aidraw_prompt_gen(self, requirement: str) -> tuple[str | None, str | None]:
+        """aidraw_prompt_generate 子代理循环：检索笔记本，生成一段英文绘画提示词。
+
+        成功返回 (提示词文本, None)；失败返回 (None, 错误信息)。
+        子代理的中间消息与检索结果仅存于本方法局部变量，工具返回后即丢弃，
+        不进宿主 _chat_history，以节省规划器上下文。
+        """
+        requirement = str(requirement or "").strip()
+        if not requirement:
+            return None, "绘图要求不能为空"
+
+        system_prompt = (
+            str(self.config.advanced.aidraw_prompt_gen_system_prompt or "").strip()
+            or _AIDRAW_PROMPT_GEN_DEFAULT_SYSTEM_PROMPT
+        )
+        max_iterations = max(
+            1, int(getattr(self.config.journal, "aidraw_prompt_gen_max_iterations", 4) or 4)
+        )
+        search_limit = int(getattr(self.config.journal, "search_limit", 10) or 10)
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"请根据以下绘图要求生成一段 AI 绘画提示词：\n{requirement}"},
+        ]
+
+        for i in range(max_iterations):
+            result = await self._direct_chat(messages, tools=[_ORGANIZE_DB_SEARCH_TOOL])
+            if not isinstance(result, dict) or not result.get("success"):
+                error = result.get("error", "unknown") if isinstance(result, dict) else result
+                self.ctx.logger.warning(f"aidraw_prompt_generate 子代理调用失败: {error}")
+                return None, f"LLM 调用失败：{error}"
+
+            tool_calls = result.get("tool_calls")
+            if tool_calls:
+                # 回传 assistant 消息时，tool_calls 需还原为 API 格式（同 organize_db 循环）
+                api_tool_calls: list[dict[str, Any]] = []
+                for call in tool_calls:
+                    func = dict(call.get("function") or {})
+                    if isinstance(func.get("arguments"), dict):
+                        func["arguments"] = json.dumps(func["arguments"], ensure_ascii=False)
+                    api_tool_calls.append({"id": str(call.get("id") or ""), "type": "function", "function": func})
+                assistant_msg: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": str(result.get("content") or ""),
+                    "tool_calls": api_tool_calls,
+                }
+                if result.get("reasoning_content"):
+                    assistant_msg["reasoning_content"] = result["reasoning_content"]
+                messages.append(assistant_msg)
+                for call in tool_calls:
+                    call_id = str(call.get("id") or "")
+                    func = call.get("function") or {}
+                    name = str(func.get("name") or "")
+                    args = func.get("arguments") or {}
+                    if not isinstance(args, dict):
+                        args = {}
+                    if name == "search_notes":
+                        tool_result = await self._execute_search_anywhere(
+                            args.get("keyword", ""),
+                            args.get("notebook", ""),
+                            args.get("limit", search_limit),
+                        )
+                        tool_result += "\n\n" + _format_iteration_hint(
+                            i + 1, max_iterations, max_iterations - i - 1
+                        )
+                    else:
+                        tool_result = f"未知工具: {name}"
+                    messages.append({"role": "tool", "tool_call_id": call_id, "content": tool_result})
+                continue
+
+            final_text = _strip_code_fence(result.get("content") or "")
+            if not final_text:
+                self.ctx.logger.warning("aidraw_prompt_generate 子代理返回空内容")
+                return None, "子代理未返回内容"
+            return final_text, None
+
+        self.ctx.logger.warning("aidraw_prompt_generate 子代理达到最大迭代次数")
+        return None, "子代理检索达到最大轮数仍未生成提示词"
+
     async def _run_organize_db_round(
         self,
         messages: list[dict[str, Any]],
@@ -288,7 +435,7 @@ class OrganizeMixin:
         执行 search_notes 时会向 progress["searches"] 追加检索记录用于前端展示进度。
         """
         max_iterations = max(1, int(cfg.max_iterations or 8))
-        for _ in range(max_iterations):
+        for i in range(max_iterations):
             result = await self._direct_chat(messages, tools=[_ORGANIZE_DB_SEARCH_TOOL])
             if not isinstance(result, dict) or not result.get("success"):
                 error = result.get("error", "unknown") if isinstance(result, dict) else result
@@ -327,6 +474,9 @@ class OrganizeMixin:
                             args.get("keyword", ""),
                             args.get("notebook", ""),
                             args.get("limit", cfg.search_limit),
+                        )
+                        tool_result += "\n\n" + _format_iteration_hint(
+                            i + 1, max_iterations, max_iterations - i - 1
                         )
                         if progress is not None:
                             progress["searches"].append(
@@ -576,7 +726,7 @@ class OrganizeMixin:
         ]
 
         max_iterations = max(1, int(cfg.max_iterations or 8))
-        for _ in range(max_iterations):
+        for i in range(max_iterations):
             result = await self._direct_chat(messages, tools=[_ORGANIZE_DB_SEARCH_TOOL])
             if not isinstance(result, dict) or not result.get("success"):
                 error = result.get("error", "unknown") if isinstance(result, dict) else result
@@ -610,6 +760,9 @@ class OrganizeMixin:
                     if name == "search_notes":
                         tool_result = await self._execute_search_notes_multi(
                             args.get("keyword", ""), ref_names, args.get("limit", cfg.search_limit)
+                        )
+                        tool_result += "\n\n" + _format_iteration_hint(
+                            i + 1, max_iterations, max_iterations - i - 1
                         )
                         if progress is not None:
                             progress.setdefault("searches", []).append(
@@ -648,23 +801,29 @@ class OrganizeMixin:
         mode_prompt: str,
         ref_names: list[str],
         resume_state: dict[str, Any] | None = None,
+        max_retries: int | None = None,
+        on_failure: str | None = None,
     ) -> None:
         """txt 批量写入后台任务。
 
-        每段失败按 `[txt_import].max_retries` 重试；仍失败按 `[txt_import].on_failure`：
+        每段失败按 max_retries 重试；仍失败按 on_failure：
         interrupt → 缓存 `tmp_import/import.state.json` 并置任务为『中断』（可再次尝试/取消，
         跨插件重载可恢复）；skip → 跳过该段记录失败，继续下一段。
+        重试配置由 WebUI 页面在启动任务时传入；中断续跑时从 resume_state 回读启动时的设置。
         """
         cfg = self.config.organize_db
-        txt_cfg = self.config.txt_import
-        max_retries = int(getattr(txt_cfg, "max_retries", 3) or 0)
-        on_failure = str(getattr(txt_cfg, "on_failure", "interrupt") or "interrupt")
+        state = resume_state or {}
+        if max_retries is None:
+            max_retries = int(state.get("max_retries", 3) or 3)
+        max_retries = max(0, min(20, int(max_retries)))
+        if on_failure is None:
+            on_failure = str(state.get("on_failure", "interrupt") or "interrupt")
         if on_failure not in ("interrupt", "skip"):
             on_failure = "interrupt"
-        failed: list[dict[str, Any]] = list((resume_state or {}).get("failed") or [])
-        seg_status = list((resume_state or {}).get("segment_status") or ["pending"] * len(segments))
+        failed: list[dict[str, Any]] = list(state.get("failed") or [])
+        seg_status = list(state.get("segment_status") or ["pending"] * len(segments))
         total = len(segments)
-        start_idx = int((resume_state or {}).get("current_index", 0))
+        start_idx = int(state.get("current_index", 0))
         state_path = self._tmp_import_dir / _TXT_IMPORT_STATE_FILE
 
         # current 为"下一个待处理段的索引"，随进度更新，保证中断后能准确续跑
@@ -679,6 +838,8 @@ class OrganizeMixin:
                     "segments": segments,
                     "mode_prompt": mode_prompt,
                     "ref_names": ref_names,
+                    "max_retries": max_retries,
+                    "on_failure": on_failure,
                     "current_index": current,
                     "segment_status": seg_status,
                     "failed": failed,

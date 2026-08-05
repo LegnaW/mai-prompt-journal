@@ -1,10 +1,9 @@
 """插件配置模型。"""
 
-from typing import Literal
-
 from maibot_sdk import Field, PluginConfigBase
 
 from .constants import (
+    _AIDRAW_PROMPT_GEN_DEFAULT_SYSTEM_PROMPT,
     _BATCH_IMPORT_DEFAULT_PROMPT,
     _DEDUP_MERGE_DEFAULT_SYSTEM_PROMPT,
     _DEDUP_SCAN_BLOCK,
@@ -24,7 +23,7 @@ class PluginSectionConfig(PluginConfigBase):
         json_schema_extra={"label": "启用插件", "hint": "是否启用本插件", "order": 0},
     )
     config_version: str = Field(
-        default="2.3.1",
+        default="2.4.0",
         description="配置版本",
         json_schema_extra={"label": "配置版本", "hint": "当前配置的版本号，一般无需修改", "order": 1},
     )
@@ -79,7 +78,7 @@ class JournalConfig(PluginConfigBase):
         default=False,
         description="去重检测是否检测所有笔记本",
         json_schema_extra={
-            "label": "检测所有笔记本",
+            "label": "去重检测所有笔记本",
             "hint": "开启则跨所有笔记本检测重复；关闭只检测目标笔记本",
             "order": 5,
         },
@@ -105,6 +104,27 @@ class JournalConfig(PluginConfigBase):
             "hint": "已迁移到『高级』分类下的『去重扫描分块大小』，此字段仅供旧配置自动迁移，请勿直接填写",
             "order": 7,
             "hidden": True,
+        },
+    )
+    aidraw_prompt_gen_enabled: bool = Field(
+        default=False,
+        description="是否启用 aidraw_prompt_generate 子代理构建提示词工具",
+        json_schema_extra={
+            "label": "启用SubAgent构建提示词",
+            "hint": "允许规划器使用aidraw_prompt_generate工具以子代理的方式构建提示词，更省上下文，需配置LLM直连",
+            "order": 8,
+        },
+    )
+    aidraw_prompt_gen_max_iterations: int = Field(
+        default=4,
+        ge=1,
+        le=30,
+        description="aidraw_prompt_generate 子代理最大检索轮数",
+        json_schema_extra={
+            "label": "SubAgent最大检索轮数",
+            "hint": "子代理调用 search_notes 工具的最大轮数，与 WebUI 操作数据库上限独立",
+            "order": 9,
+            "x-widget": "number",
         },
     )
 
@@ -291,7 +311,7 @@ class AdvancedConfig(PluginConfigBase):
 
     __ui_label__ = "高级"
     __ui_icon__ = "settings"
-    __ui_order__ = 7
+    __ui_order__ = 8
 
     dedup_merge_system_prompt: str = Field(
         default=_DEDUP_MERGE_DEFAULT_SYSTEM_PROMPT,
@@ -337,6 +357,17 @@ class AdvancedConfig(PluginConfigBase):
             "order": 3,
         },
     )
+    aidraw_prompt_gen_system_prompt: str = Field(
+        default=_AIDRAW_PROMPT_GEN_DEFAULT_SYSTEM_PROMPT,
+        description="aidraw_prompt_generate 子代理系统提示词，留空用内置默认",
+        json_schema_extra={
+            "label": "SubAgent提示词生成系统提示词",
+            "hint": "aidraw_prompt_generate 子代理使用的系统提示词，留空使用内置默认（LLM 由 [llm] 节配置）。默认不建议修改",
+            "order": 4,
+            "x-widget": "textarea",
+            "rows": 8,
+        },
+    )
 
 
 class BackupConfig(PluginConfigBase):
@@ -344,7 +375,7 @@ class BackupConfig(PluginConfigBase):
 
     __ui_label__ = "备份"
     __ui_icon__ = "archive"
-    __ui_order__ = 8
+    __ui_order__ = 7
 
     enabled: bool = Field(
         default=True,
@@ -369,66 +400,6 @@ class BackupConfig(PluginConfigBase):
     )
 
 
-class TxtImportConfig(PluginConfigBase):
-    """txt 批量写入的重试与失败处理。"""
-
-    __ui_label__ = "txt 批量写入"
-    __ui_icon__ = "file-text"
-    __ui_order__ = 9
-
-    max_retries: int = Field(
-        default=3,
-        ge=0,
-        le=20,
-        description="每个段失败后的最大重试次数",
-        json_schema_extra={
-            "label": "失败最大重试",
-            "hint": "单个段处理失败后最多重试几次（含 API 层的瞬时失败兜底），0 表示不额外重试",
-            "order": 0,
-            "x-widget": "number",
-        },
-    )
-    on_failure: Literal["interrupt", "skip"] = Field(
-        default="interrupt",
-        description="段重试仍失败后的行为",
-        json_schema_extra={
-            "label": "失败后行为",
-            "hint": "interrupt=中断整个导入并缓存进度，可在导入页选择再次尝试或取消；skip=跳过该段并记录到失败列表，继续处理下一段",
-            "order": 1,
-        },
-    )
-
-
-class FileIOConfig(PluginConfigBase):
-    """笔记本导入/导出（jsonl / mpj）的重试与失败处理。"""
-
-    __ui_label__ = "导入 / 导出"
-    __ui_icon__ = "file-import"
-    __ui_order__ = 10
-
-    max_retries: int = Field(
-        default=3,
-        ge=0,
-        le=20,
-        description="每个条目失败后的最大重试次数",
-        json_schema_extra={
-            "label": "失败最大重试",
-            "hint": "单个条目 embed 失败后最多重试几次（含 API 层的瞬时失败兜底），0 表示不额外重试",
-            "order": 0,
-            "x-widget": "number",
-        },
-    )
-    on_failure: Literal["interrupt", "skip"] = Field(
-        default="interrupt",
-        description="条目重试仍失败后的行为",
-        json_schema_extra={
-            "label": "失败后行为",
-            "hint": "interrupt=中断整个导入/导出并缓存进度，可在传输状态区选择再次尝试或取消；skip=跳过失败条目继续（导出 mpj 时失败条目会被丢弃，仅导出成功子集）",
-            "order": 1,
-        },
-    )
-
-
 class PromptJournalConfig(PluginConfigBase):
     """麦麦的绘图笔记本配置。"""
 
@@ -439,7 +410,5 @@ class PromptJournalConfig(PluginConfigBase):
     llm: DirectLlmConfig = Field(default_factory=DirectLlmConfig)
     dedup_merge: DedupMergeConfig = Field(default_factory=DedupMergeConfig)
     organize_db: OrganizeDbConfig = Field(default_factory=OrganizeDbConfig)
-    advanced: AdvancedConfig = Field(default_factory=AdvancedConfig)
     backup: BackupConfig = Field(default_factory=BackupConfig)
-    txt_import: TxtImportConfig = Field(default_factory=TxtImportConfig)
-    file_io: FileIOConfig = Field(default_factory=FileIOConfig)
+    advanced: AdvancedConfig = Field(default_factory=AdvancedConfig)

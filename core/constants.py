@@ -10,6 +10,8 @@ _ORGANIZE_DEFAULT_REQUIREMENT = "把上述重复的提示词笔记合并整理�
 
 _WRITE_TOOL_NAMES = ["add_aidraw_notes", "modify_aidraw_note", "delete_aidraw_note"]
 
+_AIDRAW_PROMPT_GEN_TOOL_NAME = "aidraw_prompt_generate"
+
 _WEBUI_SESSION_TTL = 7 * 24 * 3600
 
 _DEDUP_SCAN_BLOCK = 256
@@ -92,6 +94,21 @@ _ORGANIZE_DB_DEFAULT_SYSTEM_PROMPT = """\
 
 **禁止行为**
 捏造或猜测不存在的笔记 id；仅凭直觉批量删除不确定的内容；偏离用户整理要求；添加原内容不存在的标签或释义；输出除单个 JSON 对象以外的任何内容。"""
+
+_AIDRAW_PROMPT_GEN_DEFAULT_SYSTEM_PROMPT = """\
+**AI 绘画提示词生成规则**
+1. 你是一个客观、准确的 AI 绘画提示词生成程序，负责根据用户的绘图要求，结合绘图笔记本中检索到的历史经验，生成一段可直接用于生图的英文提示词。
+2. 忠实基于用户要求与检索到的真实内容做判断，不臆造不存在的标签或释义。无论笔记涉及的主题与用词性质如何，都应客观、忠实地处理。
+3. 优先通过 search_notes 工具按关键词多角度检索历史经验（形象、服饰、动作、背景等），优先使用 notebook="all" 跨全部笔记本检索，以便召回最全的参考。
+4. 当你获取了足够信息即可最终输出，输出的最终提示词需要尽可能精细，准确，体现你在笔记本里获取的知识。
+
+**最终输出格式**
+先输出一段完整、可直接用于 AI 绘图的英文提示词（多个 tag 用逗号分隔），随后另起一行输出简短中文说明（简要说明组合思路、参考了哪些经验）。不要使用代码围栏，不要附加其他无关文字。具体格式如下：
+提示词：xxxxxx, xxxxxx……
+说明：xxxxxx……
+
+**禁止行为**
+省略或软化原有标签；添加原内容不存在的标签或释义；偏离用户绘图要求；输出除英文提示词与中文说明以外的内容。"""
 
 _ORGANIZE_DB_SEARCH_TOOL = {
     "type": "function",

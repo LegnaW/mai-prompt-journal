@@ -101,6 +101,45 @@ WebUI 为多页面静态站点（无构建步骤）：`/` 返回 `web/index.html
 ### 3. 依赖声明
 第三方 Python 依赖在 `_manifest.json` 的 `dependencies` 声明（`type: "python_package"`），插件系统自动安装。当前依赖：`numpy`、`aiohttp`。
 
+## 主程序规划器上下文 / 工具机制（宿主管线参考）
+
+> 理解宿主（MaiBot-main）LLM 规划器如何运作的参考，路径均为相对 `MaiBot-main/`。本插件 WebUI 的 LLM 整理 / 操作数据库 / 批量导入**全部走自研 `_direct_chat` 直连 API，不经宿主规划器**，因此不受本条目所述 tool 协议 / 折叠 / 裁切约束；但若未来回退到宿主 `ctx.llm.generate_with_tools` 管线，需按本条目理解工具如何进入上下文，以及 `reasoning_content` 回传要求（宿主消息管线不承载 `reasoning_content`，详见下文「LLM 生成统一走直连 API」）。
+
+### 1. 规划器是三组件协同的 ReAct agent 循环
+- `src/maisaka/runtime.py`（`MaisakaHeartFlowChatting`）：会话运行时，持有 `_chat_history`（上下文列表）与工具注册表。
+- `src/maisaka/reasoning_engine.py`（`MaisakaReasoningEngine`）：驱动多轮循环（`run_loop` / `_run_planner_request`）。
+- `src/maisaka/chat_loop_service.py`（`MaisakaChatLoopService.chat_loop_step`）：构造 messages、真正请求 LLM。
+- 内部循环上限 `_max_internal_rounds=10`（`runtime.py`）。
+
+### 2. 上下文表示
+`_chat_history` 是 `list[LLMContextMessage]`（`src/maisaka/context/messages.py`），5 个子类：
+- `SessionBackedMessage`（user）— 真实聊天消息
+- `ComplexSessionMessage`（user）— 合并转发的摘要版
+- `ReferenceMessage`（user）— 记忆 / 黑话 / tool_hint，`count_in_context=False` 不占窗口
+- `AssistantMessage`（assistant）— 可携带 `tool_calls`
+- `ToolResultMessage`（tool）— 工具执行结果
+
+经 `to_llm_message()` 转成统一 `Message`；系统提示词来自 `prompts/{locale}/maisaka_chat.prompt`。
+
+### 3. 工具调用进入上下文只有两个写入点
+1. `reasoning_engine.py` 的 `_handle_planner_response_actions`：把带 `tool_calls` 的 `response.raw_message`（`AssistantMessage`）append 进 `_chat_history`。
+2. `_append_tool_execution_result`：把 `ToolResultMessage(tool_call_id=tool_call.call_id)` append 进去。
+
+二者靠 **`tool_call_id` 严格配对**，在历史里形成 `assistant(tool_calls) → tool → tool → ...`，下一轮模型即可看到工具结果继续推理。配对被裁切破坏时由 `src/maisaka/context/history.py` 的 `normalize_tool_call_result_pairs`（`drop_orphan_tool_results` / `drop_unanswered_tool_calls` / `normalize_tool_result_order`）修复。
+
+### 4. 工具占用上下文的上限
+- `ToolResultMessage.count_in_context = False`（`messages.py`）——tool 结果**不计入**滑动窗口，是"搭便车"的；带 tool_calls 的 `AssistantMessage` 计入。
+- **折叠约束（最强）**：`enable_context_optimization`（默认开）下，每轮后 `_trim_assistant_history_to_latest`（`context/post_processor.py`）只保留最近 `ASSISTANT_OPTIMIZATION_KEEP_COUNT=3` 条 assistant 消息，更早的 assistant+tool 链折叠成一条普通 user 文本（`source_kind="optimized_tool_history"`），绕开 tool 协议。
+- **硬裁切**：`count_in_context` 消息数 > `max_context_size×2.0` 时裁到 `×1.0`。
+- **无字符/token 截断**：进上下文的 `ToolResultMessage.content` 由 `_build_tool_result_history_content` 原样返回 `result.get_history_content()`；`reasoning_engine.py:1907` 的 2000 字符截断**只用于 monitor 终端展示摘要，不作用于上下文**。
+
+### 5. 群聊 / 私聊上下文配置的影响
+`runtime.py` 的 `_max_context_size` 按会话类型二选一：群聊 `chat.max_context_size`（默认 40）、私聊 `chat.max_private_context_size`（默认 60）。该值驱动选择窗口（`×2.0` 提升 cache 命中）、裁切阈值（`×2.0`/`×1.0`）、DB 恢复量（`×0.5`）。
+**因为 tool 结果不计入窗口，调大它多放的是"带 tool_calls 的 assistant"，顺带捎上配对 tool 结果；真正卡住"活工具消息"数量的是 assistant 折叠 keep=3（全局、与群/私聊配置无关）**。
+
+### 6. 持久化
+`_chat_history`（含 assistant/tool 消息）是**纯内存，重启即清**；工具调用另落库 `ToolRecord` 表（`_record_tool_execution_effects` → `database_service.store_tool_info`）用于审计。
+
 ## 数据模型
 
 ### 笔记条目格式（JSONL 每行一个）

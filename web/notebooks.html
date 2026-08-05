@@ -43,6 +43,7 @@
 
     <!-- ========== 选项卡二：导入 / 导出 ========== -->
     <div id="tabTransfer" class="hidden">
+      <div class="lock-hint">⚠️ 长程任务提示：导出（重建索引模式）与导入（重建索引）期间会占用笔记本写入锁，机器人对话侧的 add / modify / delete 工具将暂时不可用，建议在机器人空闲时使用。</div>
       <div class="two-col">
         <div class="col">
           <strong>导出</strong>
@@ -86,6 +87,14 @@
               <input type="number" id="embDim" placeholder="如 1024（留空不校验，导出前按此值核对返回维度）" min="0">
             </div>
             <div style="margin-top:10px;"><button class="btn btn-outline btn-sm" onclick="saveEmbeddingProfile()">保存配置</button></div>
+          </div>
+          <div class="row hidden" id="exportRetryRow" style="margin-top:10px;gap:16px;flex-wrap:wrap;">
+            <span style="font-size:12px;color:#333;">失败处理（仅重建索引导出生效）:</span>
+            <label>重试次数
+              <input type="number" id="exportMaxRetries" value="3" min="0" max="20" style="width:70px;">
+            </label>
+            <label><input type="radio" name="exportOnFailure" value="interrupt" checked> 失败即中断（缓存进度，可再次尝试）</label>
+            <label><input type="radio" name="exportOnFailure" value="skip"> 失败则跳过该条目</label>
           </div>
         </div>
 
@@ -273,7 +282,9 @@ function onExportChange() {
 }
 
 function onExportModeChange() {
-  document.getElementById('embeddingConfigRow').classList.toggle('hidden', document.getElementById('exportMode').value !== 'rebuild');
+  const rebuild = document.getElementById('exportMode').value === 'rebuild';
+  document.getElementById('embeddingConfigRow').classList.toggle('hidden', !rebuild);
+  document.getElementById('exportRetryRow').classList.toggle('hidden', !rebuild);
 }
 
 function loadEmbeddingProfile() {
@@ -316,11 +327,14 @@ function doExport() {
   const fmt = document.getElementById('exportFormat').value;
   const mode = document.getElementById('exportFormat').value === 'mpj' ? document.getElementById('exportMode').value : 'direct';
   const startExport = () => {
+    const onFailureEl = document.querySelector('input[name="exportOnFailure"]:checked');
     const body = {
       notebook: document.getElementById('exportNotebook').value,
       format: fmt,
       mode: mode,
       filename: document.getElementById('exportFilename').value.trim(),
+      max_retries: parseInt(document.getElementById('exportMaxRetries').value || '3', 10),
+      on_failure: onFailureEl ? onFailureEl.value : 'interrupt',
     };
     api('POST', '/api/export/start', body).then(data => {
       if (data.error) { alert(data.error); return; }
@@ -535,6 +549,14 @@ function renderImportPreview(meta) {
   </div>
   <div id="mergeHint" class="hidden" style="font-size:12px;color:#c62828;margin-bottom:6px;">合并后建议到「去重」页扫描一次去重检测。</div>`;
 
+  html += `<div class="row" style="margin:10px 0;gap:16px;flex-wrap:wrap;">
+    <span style="font-size:12px;color:#333;">失败处理（重建索引导入生效）:</span>
+    <label>重试次数
+      <input type="number" id="importFileMaxRetries" value="3" min="0" max="20" style="width:70px;">
+    </label>
+    <label><input type="radio" name="importFileOnFailure" value="interrupt" checked> 失败即中断（缓存进度，可再次尝试）</label>
+    <label><input type="radio" name="importFileOnFailure" value="skip"> 失败则跳过该条目</label>
+  </div>`;
   html += `<div class="row" style="margin:10px 0;gap:8px;flex-wrap:wrap;">
     ${isMpj ? `<button class="btn btn-success" id="directBtn" data-can-direct="${dimOk && countOk ? '1' : '0'}"
       onclick="doCommit('direct')" title="${dimOk && countOk ? '使用 mpj 自带索引直接导入' : '仅 mpj 且维度/数量一致才可直接导入'}">直接导入</button>` : ''}
@@ -610,7 +632,14 @@ function loadPreviewPage(page) {
 
 function doCommit(mode) {
   const t = document.getElementById('importTargetType').value;
-  const body = { mode: mode || 'rebuild', target_name: '', merge_target: '' };
+  const onFailureEl = document.querySelector('input[name="importFileOnFailure"]:checked');
+  const body = {
+    mode: mode || 'rebuild',
+    target_name: '',
+    merge_target: '',
+    max_retries: parseInt(document.getElementById('importFileMaxRetries').value || '3', 10),
+    on_failure: onFailureEl ? onFailureEl.value : 'interrupt',
+  };
   if (t === 'merge') {
     body.merge_target = document.getElementById('importMergeTarget').value;
     if (!body.merge_target) { alert('请选择合并目标'); return; }

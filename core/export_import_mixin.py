@@ -222,11 +222,14 @@ class ExportImportMixin:
             except OSError:
                 pass
 
-    def _file_io_retry_cfg(self) -> tuple[int, str]:
-        """读取 [file_io] 的重试配置：返回 (max_retries, on_failure)。"""
-        cfg = self.config.file_io
-        max_retries = int(getattr(cfg, "max_retries", 3) or 0)
-        on_failure = str(getattr(cfg, "on_failure", "interrupt") or "interrupt")
+    @staticmethod
+    def _normalize_retry_params(max_retries: Any, on_failure: Any) -> tuple[int, str]:
+        """归一化重试配置：返回 (max_retries, on_failure)。
+
+        重试配置已从 [file_io] 配置节迁移到 WebUI 页面按任务传入。
+        """
+        max_retries = max(0, min(20, int(max_retries if max_retries is not None else 3)))
+        on_failure = str(on_failure or "interrupt")
         if on_failure not in ("interrupt", "skip"):
             on_failure = "interrupt"
         return max_retries, on_failure
@@ -407,7 +410,15 @@ class ExportImportMixin:
         mode: str,
         filename: str,
         resume_ctx: dict[str, Any] | None = None,
+        max_retries: int | None = None,
+        on_failure: str | None = None,
     ) -> None:
+        # 重试配置已从 [file_io] 迁移到 WebUI 按任务传入；续跑时从 resume_ctx 回读启动时的设置
+        if max_retries is None:
+            max_retries = int((resume_ctx or {}).get("max_retries", 3) or 3)
+        if on_failure is None:
+            on_failure = str((resume_ctx or {}).get("on_failure", "interrupt") or "interrupt")
+        max_retries, on_failure = self._normalize_retry_params(max_retries, on_failure)
         try:
             nb = self._get_notebook(notebook)
             if nb is None:
@@ -425,9 +436,15 @@ class ExportImportMixin:
                     # 启动即写续跑上下文：进程被强杀/断电时磁盘上也有任务参数可续跑
                     self._write_resume_context(
                         "export_mpj",
-                        {"notebook": notebook, "format": fmt, "mode": mode, "filename": filename},
+                        {
+                            "notebook": notebook,
+                            "format": fmt,
+                            "mode": mode,
+                            "filename": filename,
+                            "max_retries": max_retries,
+                            "on_failure": on_failure,
+                        },
                     )
-                    max_retries, on_failure = self._file_io_retry_cfg()
                     resume_indices: set[int] | None = None
                     resume_vectors: np.ndarray | None = None
                     if resume_ctx:
@@ -467,7 +484,14 @@ class ExportImportMixin:
             self.ctx.logger.warning(f"导出任务中断（on_failure=interrupt）: {exc}")
             self._interrupt_file_io(
                 "export_mpj",
-                {"notebook": notebook, "format": fmt, "mode": mode, "filename": filename},
+                {
+                    "notebook": notebook,
+                    "format": fmt,
+                    "mode": mode,
+                    "filename": filename,
+                    "max_retries": max_retries,
+                    "on_failure": on_failure,
+                },
             )
             self._mark_task_interrupted(task_id, exc)
             task = self._tasks.get(task_id)
@@ -754,7 +778,15 @@ class ExportImportMixin:
         mode: str,
         merge_target: str,
         resume_ctx: dict[str, Any] | None = None,
+        max_retries: int | None = None,
+        on_failure: str | None = None,
     ) -> None:
+        # 重试配置已从 [file_io] 迁移到 WebUI 按任务传入；续跑时从 resume_ctx 回读启动时的设置
+        if max_retries is None:
+            max_retries = int((resume_ctx or {}).get("max_retries", 3) or 3)
+        if on_failure is None:
+            on_failure = str((resume_ctx or {}).get("on_failure", "interrupt") or "interrupt")
+        max_retries, on_failure = self._normalize_retry_params(max_retries, on_failure)
         try:
             meta, entries = self._read_io_preview()
             fmt = meta.get("format")
@@ -764,10 +796,15 @@ class ExportImportMixin:
             # 启动即写续跑上下文：即使进程被强杀/断电，磁盘上也有任务参数可续跑
             self._write_resume_context(
                 "import_commit",
-                {"target_name": target_name, "mode": mode, "merge_target": merge_target},
+                {
+                    "target_name": target_name,
+                    "mode": mode,
+                    "merge_target": merge_target,
+                    "max_retries": max_retries,
+                    "on_failure": on_failure,
+                },
             )
 
-            max_retries, on_failure = self._file_io_retry_cfg()
             resume_indices: set[int] | None = None
             resume_vectors: np.ndarray | None = None
             if resume_ctx:
@@ -802,7 +839,13 @@ class ExportImportMixin:
             self.ctx.logger.warning(f"导入提交任务中断（on_failure=interrupt）: {exc}")
             self._interrupt_file_io(
                 "import_commit",
-                {"target_name": target_name, "mode": mode, "merge_target": merge_target},
+                {
+                    "target_name": target_name,
+                    "mode": mode,
+                    "merge_target": merge_target,
+                    "max_retries": max_retries,
+                    "on_failure": on_failure,
+                },
             )
             self._mark_task_interrupted(task_id, exc)
             task = self._tasks.get(task_id)

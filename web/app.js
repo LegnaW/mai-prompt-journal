@@ -165,8 +165,8 @@ function injectNav(activeId) {
     <div class="topnav-links">${links}</div>
     <div class="topnav-right">
       <button class="btn btn-outline" onclick="doRefresh()" title="重新发现笔记本">刷新</button>
-      <button class="btn btn-outline" onclick="doRebuild()" title="增量重建所有笔记本索引">重建索引</button>
-      <button class="btn btn-outline" onclick="doRebuildFull()" title="全量重构所有笔记本索引（换 embedding 模型后使用）">全量重构索引</button>
+      <button class="btn btn-outline" onclick="doRebuild()" title="增量重建所有笔记本索引（期间占用写入锁，机器人对话侧写入工具暂不可用）">重建索引</button>
+      <button class="btn btn-outline" onclick="doRebuildFull()" title="全量重构所有笔记本索引（换 embedding 模型后使用；期间占用写入锁，机器人对话侧写入工具暂不可用）">全量重构索引</button>
     </div>
   </nav>`;
 }

@@ -26,7 +26,7 @@ from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
 from .core.backup_mixin import BackupMixin
 from .core.config import PromptJournalConfig
-from .core.constants import _WRITE_TOOL_NAMES
+from .core.constants import _AIDRAW_PROMPT_GEN_TOOL_NAME, _WRITE_TOOL_NAMES
 from .core.export_import_mixin import ExportImportMixin
 from .core.notebook import Notebook, scramble_id
 from .core.organize_mixin import OrganizeMixin
@@ -39,13 +39,16 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin, 
     config_model = PromptJournalConfig
 
     def normalize_plugin_config(self, config_data: Mapping[str, Any] | None) -> tuple[dict[str, Any], bool]:
-        """配置归一化：把旧版字段值迁移到『高级』配置节。
+        """配置归一化：把旧版字段值迁移到『高级』配置节，并清理已废弃的配置节。
 
         迁移对（旧节.旧字段 → 高级节.新字段）：
           dedup_merge.system_prompt        → advanced.dedup_merge_system_prompt
           organize_db.system_prompt        → advanced.organize_db_system_prompt
           organize_db.batch_import_prompt  → advanced.batch_import_prompt
           journal.dedup_scan_block         → advanced.dedup_scan_block
+
+        v2.4.0 起废弃整节（重试配置已迁移到各 WebUI 页面，按任务配置）：
+          [txt_import]  /  [file_io]
 
         仅当新字段仍为默认值时迁移旧值（避免覆盖用户已在高级节设置的值），
         随后删除旧键，再交给基类做默认补齐与校验。
@@ -59,6 +62,7 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin, 
             ("organize_db", "batch_import_prompt", "batch_import_prompt"),
             ("journal", "dedup_scan_block", "dedup_scan_block"),
         ]
+        removed_sections = ["txt_import", "file_io"]
 
         if config:
             default_advanced: dict[str, Any] = {}
@@ -86,6 +90,12 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin, 
                 if dst_key not in advanced or advanced.get(dst_key) == default_advanced.get(dst_key):
                     advanced[dst_key] = old_value
 
+            # 删除已废弃的整节（重试配置已迁移到各 WebUI 页面）
+            for section in removed_sections:
+                if section in config:
+                    del config[section]
+                    changed = True
+
         normalized, norm_changed = super().normalize_plugin_config(config)
 
         # 基类 merge 会把废弃旧字段补回默认值，这里再次移除，保证写回文件时不含废弃键
@@ -93,6 +103,12 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin, 
             src = normalized.get(src_section)
             if isinstance(src, dict) and src_key in src:
                 del src[src_key]
+                changed = True
+
+        # 基类重建时可能把废弃节补回，这里再次移除
+        for section in removed_sections:
+            if section in normalized:
+                del normalized[section]
                 changed = True
 
         return normalized, changed or norm_changed
@@ -137,8 +153,8 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin, 
         if self.config.web.enabled:
             self._web_task = asyncio.create_task(self._run_web_server())
 
-        # 按 allow_write 应用写入工具状态
-        await self._apply_write_tools_state()
+        # 按配置应用 LLM 工具开关（allow_write / aidraw_prompt_gen_enabled）
+        await self._apply_tool_states()
 
     async def on_unload(self) -> None:
         if self._web_task is not None:
@@ -152,10 +168,14 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin, 
     async def on_config_update(self, scope: str, config_data: dict, version: str) -> None:
         # 自身配置热更新：同步写入工具开关
         if scope == CONFIG_RELOAD_SCOPE_SELF:
-            await self._apply_write_tools_state()
+            await self._apply_tool_states()
 
-    async def _apply_write_tools_state(self) -> None:
-        """根据 allow_write 启用/禁用写入类 LLM 工具。"""
+    async def _apply_tool_states(self) -> None:
+        """按配置启用/禁用 LLM 工具。
+
+        allow_write 控制 add/modify/delete 三个写入工具；
+        aidraw_prompt_gen_enabled 控制 aidraw_prompt_generate 子代理工具（关闭时规划器看不到该工具）。
+        """
         allow_write = bool(getattr(self.config.journal, "allow_write", True))
         for name in _WRITE_TOOL_NAMES:
             try:
@@ -165,6 +185,15 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin, 
                     await self.ctx.component.disable_component(name, "tool", scope="global")
             except Exception as exc:
                 self.ctx.logger.warning(f"{'启用' if allow_write else '禁用'}工具 {name} 失败: {exc}")
+
+        prompt_gen_enabled = bool(getattr(self.config.journal, "aidraw_prompt_gen_enabled", False))
+        try:
+            if prompt_gen_enabled:
+                await self.ctx.component.enable_component(_AIDRAW_PROMPT_GEN_TOOL_NAME, "tool", scope="global")
+            else:
+                await self.ctx.component.disable_component(_AIDRAW_PROMPT_GEN_TOOL_NAME, "tool", scope="global")
+        except Exception as exc:
+            self.ctx.logger.warning(f"{'启用' if prompt_gen_enabled else '禁用'}工具 {_AIDRAW_PROMPT_GEN_TOOL_NAME} 失败: {exc}")
 
     def _migrate_legacy(self) -> None:
         """将旧版 notes.jsonl 迁移为 default.jsonl 并补生成 note_id。"""
@@ -473,6 +502,43 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin, 
                 "content": "\n".join(lines),
                 "results": results,
             }
+
+    @Tool(
+        "aidraw_prompt_generate",
+        brief_description="传入绘图要求（人物形象/服饰，动作，背景环境等），根据笔记本内容自动输出成品提示词。若需构建提示词请优先使用此工具而非read_aidraw_notes。",
+        detailed_description=(
+            "当需要画图时调用。传入绘图要求（人物形象/服饰、标签动作、背景环境等），"
+            "本工具会释放一个子代理自行检索绘图笔记本中相关的提示词经验，"
+            "最终只返回一段成品英文提示词和简短中文说明，不占用你的上下文。"
+            "适合需要综合多条经验的场景，比逐条 read_aidraw_notes 更省上下文。"
+        ),
+        parameters=[
+            ToolParameterInfo(
+                name="requirement",
+                param_type=ToolParamType.STRING,
+                description="绘图要求，尽量简明扼要",
+                required=True,
+            ),
+        ],
+    )
+    async def handle_aidraw_prompt_generate(self, requirement: str = "", **kwargs: Any) -> dict[str, Any]:
+        requirement = str(requirement or "").strip()
+        if not requirement:
+            return {"name": _AIDRAW_PROMPT_GEN_TOOL_NAME, "content": "绘图要求不能为空"}
+
+        if not bool(getattr(self.config.journal, "aidraw_prompt_gen_enabled", False)):
+            return {
+                "name": _AIDRAW_PROMPT_GEN_TOOL_NAME,
+                "content": "aidraw_prompt_generate 工具已禁用，请使用 read_aidraw_notes 自行检索",
+            }
+
+        result_text, error = await self._run_aidraw_prompt_gen(requirement)
+        if error is not None:
+            return {
+                "name": _AIDRAW_PROMPT_GEN_TOOL_NAME,
+                "content": f"{error}。可改用 read_aidraw_notes 自行检索绘图经验。",
+            }
+        return {"name": _AIDRAW_PROMPT_GEN_TOOL_NAME, "content": result_text}
 
     @Tool(
         "modify_aidraw_note",
