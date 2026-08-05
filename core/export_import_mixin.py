@@ -379,8 +379,11 @@ class ExportImportMixin:
         meta["dim_match"] = dim_match
 
         sample_stats: dict[str, Any] = {"n": 0, "avg": None, "min": None}
+        if sample_n <= 0:
+            # 抽样条数填 0：不校验相似度
+            sample_stats["skipped"] = True
         # 维度一致且 条目数=向量数 时才抽样（否则索引无法对齐，可能是被篡改）
-        if dim_match and meta["count_match"] and entries:
+        elif dim_match and meta["count_match"] and entries:
             n = max(1, min(int(sample_n or _DEFAULT_VALIDATE_SAMPLE), len(entries)))
             idxs = random.sample(range(len(entries)), n)
             emb_f32 = emb.astype(np.float32)

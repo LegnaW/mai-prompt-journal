@@ -1287,7 +1287,7 @@ class WebUIMixin:
                 source = await part.read()
             elif part.name == "sample":
                 try:
-                    sample_n = max(1, min(200, int((await part.read()).decode())))
+                    sample_n = max(0, min(200, int((await part.read()).decode())))
                 except Exception:
                     pass
         if not source or not filename:
