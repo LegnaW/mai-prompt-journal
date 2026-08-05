@@ -303,9 +303,10 @@ schema = generate_plugin_config_schema(m.PromptJournalConfig)
 无 pytest。改完必须：
 1. `python3 -m py_compile plugin.py` 验证语法
 2. 用 AST 检查确认 Tool/Command/HomeCard/路由注册无遗漏
-3. 若改 `_compute_text_boost`，用独立脚本跑加分规则用例
-4. 若改 WebUI，用脚本检查 HTML div 配对、关键元素存在
-5. 若改配置模型，用 uv 虚拟环境（`MaiBot-main/.venv/bin/python`）跑 `generate_plugin_config_schema` 实测 label/hint/ui_type（见上文"验证 Schema"）
+3. 用 ruff 查未定义名（`/root/mai/MaiBot-main/.venv/bin/ruff check --select F821 plugin.py core/*.py`）——**拆分/新增模块后必跑**，防止漏 import（曾因缺 hashlib/time/_split_txt 导致重建索引、批量导入、update_md5 运行时 NameError）
+4. 若改 `_compute_text_boost`，用独立脚本跑加分规则用例
+5. 若改 WebUI，用脚本检查 HTML div 配对、关键元素存在
+6. 若改配置模型，用 uv 虚拟环境（`MaiBot-main/.venv/bin/python`）跑 `generate_plugin_config_schema` 实测 label/hint/ui_type（见上文"验证 Schema"）
 
 ## 维护提示
 
