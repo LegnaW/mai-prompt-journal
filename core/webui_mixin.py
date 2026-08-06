@@ -77,6 +77,7 @@ class WebUIMixin:
             app.router.add_get("/api/import/state", self._web_import_state)
             app.router.add_post("/api/notebooks/delete", self._web_delete_notebook)
             app.router.add_post("/api/notebooks/create", self._web_create_notebook)
+            app.router.add_post("/api/notebooks/toggle", self._web_toggle_notebook)
             app.router.add_get("/api/dedup/scan", self._web_dedup_scan)
             app.router.add_post("/api/dedup/resolve", self._web_dedup_resolve)
             app.router.add_post("/api/dedup/organize_preview", self._web_organize_preview)
@@ -199,7 +200,12 @@ class WebUIMixin:
                 status = "ok"
             else:
                 status = "stale"
-            notebooks_info.append({"name": name, "count": count, "status": status})
+            notebooks_info.append({
+                "name": name,
+                "count": count,
+                "status": status,
+                "disabled": self._is_notebook_disabled(name),
+            })
         return await self._web_json_response(request, {"notebooks": notebooks_info})
 
     async def _web_notes(self, request: Any) -> Any:
@@ -1278,6 +1284,10 @@ class WebUIMixin:
                     except Exception as exc:
                         self.ctx.logger.error(f"删除文件失败 {path}: {exc}")
             self._notebooks = self._discover_notebooks()
+            # 清理已删除笔记本在禁用集合中的残留
+            if name in self._disabled_notebooks:
+                self._disabled_notebooks.discard(name)
+                self._save_disabled_notebooks()
 
         self.ctx.logger.info(f"已删除笔记本: {name}（删除 {removed} 个文件）")
         return web.json_response({"success": True, "name": name, "removed_files": removed})
@@ -1297,6 +1307,26 @@ class WebUIMixin:
 
         self.ctx.logger.info(f"已创建空白笔记本: {result}")
         return web.json_response({"success": True, "name": result})
+
+    async def _web_toggle_notebook(self, request: Any) -> Any:
+        """切换笔记本启用/禁用（default 不可禁用）。"""
+        from aiohttp import web
+
+        if not self._web_check_auth(request):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        body = await self._web_read_body(request)
+        name = str(body.get("name", "") or "").strip()
+        if not name:
+            return web.json_response({"error": "笔记本名称不能为空"}, status=400)
+        if name == "default":
+            return web.json_response({"error": "default 笔记本不可禁用"}, status=400)
+        if self._get_notebook(name) is None:
+            return web.json_response({"error": f"笔记本 '{name}' 不存在"}, status=404)
+        new_disabled = not self._is_notebook_disabled(name)
+        ok, msg = self._set_notebook_disabled(name, new_disabled)
+        if not ok:
+            return web.json_response({"error": msg}, status=400)
+        return web.json_response({"name": name, "disabled": new_disabled})
 
     async def _web_backups_list(self, request: Any) -> Any:
         """列出笔记本的备份。"""
