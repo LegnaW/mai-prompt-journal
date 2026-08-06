@@ -329,7 +329,7 @@ class OrganizeMixin:
             if not nb_name or nb_name == "all":
                 results = await self._search_all_notebooks(keyword, query_vec, top_k, min_score)
             else:
-                nb = self._get_notebook(nb_name)
+                nb = self._get_notebook_for_bot(nb_name)
                 if nb is None:
                     return f"笔记本 '{nb_name}' 不存在"
                 results = await self._search_single_notebook(nb, keyword, query_vec, top_k, min_score)

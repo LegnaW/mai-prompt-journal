@@ -390,11 +390,11 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin, 
             return {"name": "add_aidraw_notes", "content": "参数 notes 不能为空，且必须是数组"}
 
         nb_name = str(notebook or "").strip() or "default"
-        nb = self._get_notebook(nb_name)
+        nb = self._get_notebook_for_bot(nb_name)
         if nb is None:
             return {
                 "name": "add_aidraw_notes",
-                "content": f"笔记本 '{nb_name}' 不存在。可用笔记本: {self._list_notebook_names()}",
+                "content": f"笔记本 '{nb_name}' 不存在。可用笔记本: {self._list_enabled_notebook_names()}",
             }
 
         async with self._lock:
@@ -551,11 +551,11 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin, 
             if nb_name == "all":
                 results = await self._search_all_notebooks(query, query_vec, top_k, min_score)
             else:
-                nb = self._get_notebook(nb_name)
+                nb = self._get_notebook_for_bot(nb_name)
                 if nb is None:
                     return {
                         "name": "read_aidraw_notes",
-                        "content": f"笔记本 '{nb_name}' 不存在。可用笔记本: {self._list_notebook_names()}",
+                        "content": f"笔记本 '{nb_name}' 不存在。可用笔记本: {self._list_enabled_notebook_names()}",
                     }
                 results = await self._search_single_notebook(nb, query, query_vec, top_k, min_score)
 
@@ -669,11 +669,11 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin, 
             return {"name": "modify_aidraw_note", "content": "note_id 不能为空"}
 
         nb_name = str(notebook or "").strip() or "default"
-        nb = self._get_notebook(nb_name)
+        nb = self._get_notebook_for_bot(nb_name)
         if nb is None:
             return {
                 "name": "modify_aidraw_note",
-                "content": f"笔记本 '{nb_name}' 不存在。可用笔记本: {self._list_notebook_names()}",
+                "content": f"笔记本 '{nb_name}' 不存在。可用笔记本: {self._list_enabled_notebook_names()}",
             }
 
         async with self._lock:
@@ -800,11 +800,11 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin, 
             return {"name": "delete_aidraw_note", "content": "note_id 不能为空"}
 
         nb_name = str(notebook or "").strip() or "default"
-        nb = self._get_notebook(nb_name)
+        nb = self._get_notebook_for_bot(nb_name)
         if nb is None:
             return {
                 "name": "delete_aidraw_note",
-                "content": f"笔记本 '{nb_name}' 不存在。可用笔记本: {self._list_notebook_names()}",
+                "content": f"笔记本 '{nb_name}' 不存在。可用笔记本: {self._list_enabled_notebook_names()}",
             }
 
         async with self._lock:
