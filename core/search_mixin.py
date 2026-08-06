@@ -18,7 +18,7 @@ class SearchMixin:
         关闭时只检测目标笔记本。tmp 临时笔记本不参与。
         """
         if self.config.journal.dedup_check_all_notebooks:
-            return list(self._notebooks.values())
+            return [nb for name, nb in self._notebooks.items() if not self._is_notebook_disabled(name)]
         return [target_nb]
 
     async def _find_duplicate_matches(
@@ -121,6 +121,8 @@ class SearchMixin:
         all_results: list[dict[str, Any]] = []
 
         for name in sorted(self._notebooks.keys()):
+            if self._is_notebook_disabled(name):
+                continue
             nb = self._notebooks[name]
             if not nb.has_source:
                 continue
