@@ -871,7 +871,8 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin, 
                     status = "索引有效 ✓"
                 else:
                     status = "索引失效 ✗"
-                lines.append(f"- {name}: {count} 条, {status}")
+                dis_tag = "（已禁用）" if self._is_notebook_disabled(name) else ""
+                lines.append(f"- {name}: {count} 条, {status}{dis_tag}")
             lines.append("")
             lines.append("如需重建索引，请执行 /mpj rebuild")
 
@@ -959,6 +960,12 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin, 
             "    恢复备份（恢复前自动备份当前状态）",
             "  /mpj backup delete 时间戳 [-n 笔记本]",
             "    删除备份",
+            "",
+            "🔌 笔记本开关：",
+            "  /mpj enable 笔记本名",
+            "    启用笔记本（机器人工具与「搜索全部」恢复可见）",
+            "  /mpj disable 笔记本名",
+            "    禁用笔记本（机器人不可见、不参与「搜索全部」；WebUI 仍可浏览/搜索/整理/导出；default 不可禁用）",
             "",
             "  /mpj help",
             "    显示此帮助信息",
@@ -1377,6 +1384,51 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin, 
         msg = f"已创建空白笔记本 {result}，可开始添加笔记（如 /mpj add 英文|中文 -n {result}）"
         await self.ctx.send.text(msg, stream_id)
         return True, msg, True
+
+    @Command(
+        "mpj_enable",
+        description="启用笔记本（机器人工具与搜索全部恢复可见）",
+        pattern=r"^/mpj\s+enable\s+(?P<name>.+)$",
+    )
+    async def handle_cmd_enable(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, bool]:
+        user_id = str(kwargs.get("user_id", "") or "").strip()
+        if not self._is_admin(user_id):
+            return True, "", False
+        name = str((kwargs.get("matched_groups", {}) or {}).get("name", "") or "").strip()
+        if not name:
+            await self.ctx.send.text("用法: /mpj enable <笔记本名>", stream_id)
+            return True, "", True
+        ok, msg = self._set_notebook_disabled(name, False)
+        if not ok:
+            await self.ctx.send.text(msg, stream_id)
+            return True, "", True
+        await self.ctx.send.text(
+            f"已启用笔记本 {name}（机器人工具与「搜索全部」恢复可见）", stream_id
+        )
+        return True, "", True
+
+    @Command(
+        "mpj_disable",
+        description="禁用笔记本（机器人不可见、不参与搜索全部；WebUI 仍可浏览/搜索/整理/导出）",
+        pattern=r"^/mpj\s+disable\s+(?P<name>.+)$",
+    )
+    async def handle_cmd_disable(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, bool]:
+        user_id = str(kwargs.get("user_id", "") or "").strip()
+        if not self._is_admin(user_id):
+            return True, "", False
+        name = str((kwargs.get("matched_groups", {}) or {}).get("name", "") or "").strip()
+        if not name:
+            await self.ctx.send.text("用法: /mpj disable <笔记本名>", stream_id)
+            return True, "", True
+        ok, msg = self._set_notebook_disabled(name, True)
+        if not ok:
+            await self.ctx.send.text(msg, stream_id)
+            return True, "", True
+        await self.ctx.send.text(
+            f"已禁用笔记本 {name}（机器人将不再使用它；WebUI 内仍可浏览/指定搜索/整理/导出；default 不可禁用）",
+            stream_id,
+        )
+        return True, "", True
 
     async def _create_blank_notebook(self, name: str) -> tuple[bool, str]:
         """创建空白笔记本并建好空索引，供 /mpj new 命令与 WebUI 笔记本管理页共用。
