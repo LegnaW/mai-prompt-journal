@@ -923,7 +923,8 @@ class OrganizeMixin:
             except Exception as exc:
                 self.ctx.logger.warning(f"写入导入失败汇总失败: {exc}")
 
-            self._tmp_finished_path.write_text("done", encoding="utf-8")
+            # 注意：任务完成时【不】写 .finished——该文件只在 WebUI 处置（merge/create）时写入，
+            # 否则 _web_import_state 会直接返回 done、跳过 ready（构建完毕/等待处置），用户无法保存临时笔记本。
             if state_path.exists():
                 try:
                     state_path.unlink()
