@@ -30,6 +30,7 @@ from .core.constants import _AIDRAW_PROMPT_GEN_TOOL_NAME, _WRITE_TOOL_NAMES
 from .core.export_import_mixin import ExportImportMixin
 from .core.notebook import Notebook, scramble_id
 from .core.organize_mixin import OrganizeMixin
+from .core.resume import save_json
 from .core.search_mixin import SearchMixin
 from .core.webui_mixin import WebUIMixin
 
@@ -299,14 +300,8 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin, 
         return {n for n in names if n in self._notebooks}
 
     def _save_disabled_notebooks(self) -> None:
-        """原子写入禁用笔记本集合到磁盘（.tmp → 改名，对齐项目原子写惯例）。"""
-        payload = {"version": 1, "disabled": sorted(self._disabled_notebooks)}
-        tmp = self._disabled_path.with_name(self._disabled_path.name + ".tmp")
-        self._disabled_path.parent.mkdir(parents=True, exist_ok=True)
-        with tmp.open("w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-            f.flush()
-        tmp.replace(self._disabled_path)
+        """原子写入禁用笔记本集合到磁盘（复用 resume.save_json：fsync + 原子改名）。"""
+        save_json(self._disabled_path, {"version": 1, "disabled": sorted(self._disabled_notebooks)})
 
     def _is_notebook_disabled(self, name: str) -> bool:
         """笔记本是否被禁用（default 恒为启用）。"""
@@ -327,18 +322,28 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin, 
             return False, f"笔记本 '{name}' 不存在"
         if self._is_notebook_disabled(name) == disabled:
             return True, f"笔记本 '{name}' 已是{'禁用' if disabled else '启用'}状态"
+        was_disabled = name in self._disabled_notebooks
         if disabled:
             self._disabled_notebooks.add(name)
         else:
             self._disabled_notebooks.discard(name)
-        self._save_disabled_notebooks()
+        try:
+            self._save_disabled_notebooks()
+        except Exception:
+            # 写盘失败回滚内存态，避免内存与磁盘分叉
+            if was_disabled:
+                self._disabled_notebooks.add(name)
+            else:
+                self._disabled_notebooks.discard(name)
+            raise
         self.ctx.logger.info(f"笔记本 '{name}' 已{'禁用' if disabled else '启用'}")
         return True, "ok"
 
     def _get_notebook_for_bot(self, name: str) -> Notebook | None:
         """机器人侧笔记本解析：禁用本与不存在者一律返回 None（对机器人不可见）。"""
-        nb = self._get_notebook(name)
-        if nb is None or self._is_notebook_disabled(name):
+        clean = str(name or "").strip() or "default"
+        nb = self._get_notebook(clean)
+        if nb is None or self._is_notebook_disabled(clean):
             return None
         return nb
 
