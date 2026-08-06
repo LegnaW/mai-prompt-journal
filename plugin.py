@@ -143,6 +143,10 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin, 
         # 发现笔记本
         self._notebooks = self._discover_notebooks()
 
+        # 笔记本启用/禁用状态（持久化在数据目录的 disabled_notebooks.json）
+        self._disabled_path: Path = self._data_dir / "disabled_notebooks.json"
+        self._disabled_notebooks: set[str] = self._load_disabled_notebooks()
+
         # 从磁盘恢复被中断的长程任务（断点续跑）
         self._restore_interrupted_tasks()
 
@@ -272,6 +276,75 @@ class PromptJournalPlugin(MaiBotPlugin, WebUIMixin, OrganizeMixin, SearchMixin, 
 
     def _list_notebook_names(self) -> str:
         return ", ".join(sorted(self._notebooks.keys()))
+
+    def _load_disabled_notebooks(self) -> set[str]:
+        """从数据目录加载被禁用的笔记本名集合。
+
+        容错：文件缺失/损坏/字段非 list 返回空集。
+        防御性剔除：default、tmp、以及当前已不存在的笔记本名（笔记本被删后自清理残留）。
+        """
+        if not self._disabled_path.exists():
+            return set()
+        try:
+            with self._disabled_path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return set()
+        raw = data.get("disabled") if isinstance(data, dict) else None
+        if not isinstance(raw, list):
+            return set()
+        names = {str(n).strip() for n in raw if isinstance(n, str) and str(n).strip()}
+        names.discard("default")
+        names.discard("tmp")
+        return {n for n in names if n in self._notebooks}
+
+    def _save_disabled_notebooks(self) -> None:
+        """原子写入禁用笔记本集合到磁盘（.tmp → 改名，对齐项目原子写惯例）。"""
+        payload = {"version": 1, "disabled": sorted(self._disabled_notebooks)}
+        tmp = self._disabled_path.with_name(self._disabled_path.name + ".tmp")
+        self._disabled_path.parent.mkdir(parents=True, exist_ok=True)
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.flush()
+        tmp.replace(self._disabled_path)
+
+    def _is_notebook_disabled(self, name: str) -> bool:
+        """笔记本是否被禁用（default 恒为启用）。"""
+        if name == "default":
+            return False
+        return name in self._disabled_notebooks
+
+    def _set_notebook_disabled(self, name: str, disabled: bool) -> tuple[bool, str]:
+        """切换笔记本启用/禁用并落盘。返回 (ok, message)。命令与 WebUI 共用入口。"""
+        name = str(name or "").strip()
+        if not name:
+            return False, "笔记本名称不能为空"
+        if name == "default":
+            return False, "default 笔记本不可禁用"
+        if name == "tmp":
+            return False, "tmp 临时笔记本不可禁用"
+        if self._get_notebook(name) is None:
+            return False, f"笔记本 '{name}' 不存在"
+        if self._is_notebook_disabled(name) == disabled:
+            return True, f"笔记本 '{name}' 已是{'禁用' if disabled else '启用'}状态"
+        if disabled:
+            self._disabled_notebooks.add(name)
+        else:
+            self._disabled_notebooks.discard(name)
+        self._save_disabled_notebooks()
+        self.ctx.logger.info(f"笔记本 '{name}' 已{'禁用' if disabled else '启用'}")
+        return True, "ok"
+
+    def _get_notebook_for_bot(self, name: str) -> Notebook | None:
+        """机器人侧笔记本解析：禁用本与不存在者一律返回 None（对机器人不可见）。"""
+        nb = self._get_notebook(name)
+        if nb is None or self._is_notebook_disabled(name):
+            return None
+        return nb
+
+    def _list_enabled_notebook_names(self) -> str:
+        """机器人侧错误消息用：仅列出启用笔记本名。"""
+        return ", ".join(sorted(n for n in self._notebooks if not self._is_notebook_disabled(n)))
 
     @Tool(
         "add_aidraw_notes",
