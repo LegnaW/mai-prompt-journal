@@ -281,7 +281,7 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 
 把一份 txt 按段落批量交给 LLM 处理，写入临时笔记本，完成后可查看/编辑/处置。
 
-- **切分**：`_split_txt`（模块级函数）按两个及以上连续换行（`\n{2,}`）切分，段首尾 strip，忽略空段，单段也能导入。
+- **切分（拆分开关）**：`_split_txt`（模块级函数）按两个及以上连续换行（`\n{2,}`）切分，段首尾 strip，忽略空段，单段也能导入。导入页有「按段落拆分」勾选框（默认**关闭**）：关闭时整篇文本作为 **1 段**处理，不调 `_split_txt`；开启时才切段。`POST /api/import/preview` 与 `POST /api/import/start` 均接收 `split`（bool，默认 false），preview 响应回传 `split` 供前端显示。断点续跑状态 `import.state.json` 已存 `segments`，无需额外持久化该开关。
 - **临时笔记本**：固定名 `tmp`，文件在 `data_dir/tmp_import/`（`tmp.jsonl` / `tmp.cache.jsonl` / `tmp.embeddings.npy` / `tmp.index.meta` / `import.log`），用 `Notebook("tmp", data_dir, custom_dir=tmp_import_dir)` 构造，**不参与** `_discover_notebooks`（但 `_get_notebook("tmp")` 返回它，供 `/api/modify`、`/api/delete` 编辑临时条目）。一轮完成后**不清理**；下一轮导入开始前 `_reset_tmp_import()` 清空。
 - **一段一完整循环**：`_run_import_segment` 对每段独立跑 agent 循环（多轮 search_notes），搜索范围 = 用户选择的引用笔记本 + 临时笔记本（`_execute_search_notes_multi`）；系统提示词 = `advanced.organize_db_system_prompt` + `\n` + `advanced.batch_import_prompt`（`{temp-journal}` 替换为 `tmp`，约束 LLM 只能改临时笔记本）；输出完整 create/update/delete，`_apply_ops_to_tmp` 应用后 `_rebuild_notebook(tmp)` 增量重建，下一段可见。每轮 search_notes 返回末尾同样追加 `_format_iteration_hint`。
 - **模式（附加提示词）是纯前端**：`web/import.html` 五模式单选（学习描述方式/导入oc设计/提取动作模板/提取服饰穿搭/自定义），预设直接发对应 `IMPORT_MODE_PROMPTS` 文本，自定义弹窗输入；`POST /api/import/start` 的 `mode_prompt` 字段后端仅校验非空（双重校验）。

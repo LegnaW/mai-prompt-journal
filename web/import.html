@@ -52,6 +52,9 @@
       </div>
       <div style="font-size:12px;color:#999;">选择预设模式时附加提示词自动锁定为对应预设，无法修改；选择"自定义"时可编辑。附加提示词将作用于整次写入的所有段落。</div>
       <div style="margin-top:8px;">
+        <label><input type="checkbox" id="importSplitCb"> 按段落拆分（开启后按两个及以上连续换行切分为多段，逐段处理；关闭则整篇作为一段处理）</label>
+      </div>
+      <div style="margin-top:8px;">
         <label style="display:block; margin-bottom:4px;">附加提示词:</label>
         <textarea id="importCustomPrompt" rows="3" placeholder="选择自定义模式后在此输入你的附加提示词"></textarea>
       </div>
@@ -185,11 +188,14 @@ function doPreviewImport() {
   const reader = new FileReader();
   reader.onload = () => {
     const text = String(reader.result || '');
-    api('POST', '/api/import/preview', { text: text }).then(data => {
+    api('POST', '/api/import/preview', { text: text, split: document.getElementById('importSplitCb').checked }).then(data => {
       const div = document.getElementById('importPreview');
       if (data.error) { div.innerHTML = `<p style="color:#c62828">${esc(data.error)}</p>`; return; }
       importSegments = data.segments;
-      div.innerHTML = `<p>共 ${data.count} 段（按连续两个及以上换行切分）：</p>` +
+      const splitLabel = data.split
+        ? `共 ${data.count} 段（按连续两个及以上换行切分）：`
+        : '整篇作为 1 段处理（未开启拆分）：';
+      div.innerHTML = `<p>${splitLabel}</p>` +
         data.segments.map((s, i) => `
           <div style="border:1px solid #eee;border-radius:6px;margin:6px 0;padding:8px;">
             <strong>段 ${i+1}</strong>
@@ -226,6 +232,7 @@ function doStartImport() {
     const onFailureEl = document.querySelector('input[name="importOnFailure"]:checked');
     const payload = {
       text: text,
+      split: document.getElementById('importSplitCb').checked,
       mode_prompt: modePrompt,
       ref_notebooks: collectRefNotebooks(),
       max_retries: parseInt(document.getElementById('importMaxRetries').value || '3', 10),
@@ -255,6 +262,7 @@ function setImportDisabled(disabled) {
   const ta = document.getElementById('importCustomPrompt');
   const refs = document.querySelectorAll('.import-ref-cb');
   const startBtn = document.getElementById('importStartBtn');
+  const splitCb = document.getElementById('importSplitCb');
   const retryInputs = [
     document.getElementById('importMaxRetries'),
     ...document.querySelectorAll('input[name="importOnFailure"]'),
@@ -267,6 +275,7 @@ function setImportDisabled(disabled) {
     radios.forEach(r => r.disabled = true);
     ta.disabled = true;
     refs.forEach(r => r.disabled = true);
+    if (splitCb) splitCb.disabled = true;
     retryInputs.forEach(r => { if (r) r.disabled = true; });
     startBtn.disabled = true;
   } else {
@@ -276,6 +285,7 @@ function setImportDisabled(disabled) {
     zone.style.borderColor = '#4f9afe';
     radios.forEach(r => r.disabled = false);
     refs.forEach(r => r.disabled = false);
+    if (splitCb) splitCb.disabled = false;
     retryInputs.forEach(r => { if (r) r.disabled = false; });
     startBtn.disabled = false;
     syncImportModePrompt();

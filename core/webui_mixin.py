@@ -1004,10 +1004,12 @@ class WebUIMixin:
         text = str(body.get("text", "") or "")
         if not text.strip():
             return web.json_response({"error": "文本不能为空"}, status=400)
-        segments = _split_txt(text)
+        split = bool(body.get("split", False))
+        # 开启拆分才按连续换行切段；关闭则整篇作为一段处理
+        segments = _split_txt(text) if split else [text.strip()]
         if not segments:
             return web.json_response({"error": "没有可导入的段落"}, status=400)
-        return web.json_response({"segments": segments, "count": len(segments)})
+        return web.json_response({"segments": segments, "count": len(segments), "split": split})
 
     async def _web_import_start(self, request: Any) -> Any:
         """启动批量导入后台任务，立即返回 task_id。"""
@@ -1018,6 +1020,7 @@ class WebUIMixin:
         body = await self._web_read_body(request)
         text = str(body.get("text", "") or "")
         mode_prompt = str(body.get("mode_prompt", "") or "").strip()
+        split = bool(body.get("split", False))
         ref_raw = body.get("ref_notebooks", [])
         if not isinstance(ref_raw, list):
             ref_raw = []
@@ -1026,7 +1029,8 @@ class WebUIMixin:
             body.get("max_retries"), body.get("on_failure")
         )
 
-        segments = _split_txt(text)
+        # 开启拆分才按连续换行切段；关闭则整篇作为一段处理
+        segments = _split_txt(text) if split else [text.strip()]
         if not segments:
             return web.json_response({"error": "没有可导入的段落"}, status=400)
 
