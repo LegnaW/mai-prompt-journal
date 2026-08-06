@@ -1,6 +1,6 @@
 {
   "manifest_version": 2,
-  "version": "2.4.0",
+  "version": "2.4.1",
   "name": "麦麦的绘图笔记本",
   "description": "AI 绘画提示词经验记录与语义检索，支持向量搜索历史笔记",
   "author": {

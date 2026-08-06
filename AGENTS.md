@@ -27,7 +27,7 @@
 
 ## 近期更新（dev 分支，未发布）
 
-- **笔记本启用 / 禁用**：新增 `/mpj enable|disable <名>` 命令与 WebUI 笔记本管理页切换按钮，禁用状态持久化于 `data_dir/disabled_notebooks.json`。禁用的笔记本对机器人工具（read/add/modify/delete、SubAgent）及「搜索全部」/ 跨本写入去重**不可见**，但 WebUI 内仍可浏览 / 指定搜索 / 操作数据库 / 去重 / txt 写入 / 导出；`default` 不可禁用。详见下文「笔记本启用 / 禁用」章节。
+- **v2.4.1：笔记本启用 / 禁用**：新增 `/mpj enable|disable <名>` 命令与 WebUI 笔记本管理页切换按钮，禁用状态持久化于 `data_dir/disabled_notebooks.json`。禁用的笔记本对机器人工具（read/add/modify/delete、SubAgent）及「搜索全部」/ 跨本写入去重**不可见**，但 WebUI 内仍可浏览 / 指定搜索 / 操作数据库 / 去重 / txt 写入 / 导出；`default` 不可禁用。详见下文「笔记本启用 / 禁用」章节。
 - **v2.4.0：新增 `aidraw_prompt_generate` SubAgent 工具**：规划器（聊天侧）传入绘图要求，插件经 `_direct_chat` 直连 LLM 释放一个**子代理**自行检索笔记本（`search_notes`，notebook 可选手动/`all`，提示词提示优先 all），最终返回一段成品英文提示词 + 简短中文说明。**子代理的中间消息与检索结果工具返回后即丢弃，不进宿主 `_chat_history`，省上下文**。开关 `[journal].aidraw_prompt_gen_enabled`（默认关，关闭时规划器看不到该工具）、轮数 `[journal].aidraw_prompt_gen_max_iterations`（默认 4，与 WebUI organize_db 独立）、系统提示词 `[advanced].aidraw_prompt_gen_system_prompt`（空=内置默认）。实现：`core/organize_mixin.py` 的 `_run_aidraw_prompt_gen` / `_execute_search_anywhere` + `plugin.py` 的 `handle_aidraw_prompt_generate`。
 - **v2.4.0：txt 批量写入 / 导入导出的重试配置迁出配置文件**：删除 `[txt_import]` / `[file_io]` 配置节，`max_retries` / `on_failure` 改为**各 WebUI 页面在任务开始前按次配置**（txt 导入页与「导入/导出」页均有表单，默认 3 / interrupt）。中断续跑时从 `import.state.json` / `resume.json` 回读启动时的设置。`_run_import_task` / `_run_export_task` / `_run_file_commit_task` 改为接收参数；`_normalize_retry_params`（`core/export_import_mixin.py`）统一钳制（0–20、interrupt/skip）。
 - **v2.4.0：配置节重排**：`[advanced]`（高级）移至配置页**最底部**；`config_version` 升到 `2.4.0`；`normalize_plugin_config` 新增废弃节清理（`removed_sections`），`[txt_import]`/`[file_io]` 旧键升级时自动丢弃。
@@ -346,7 +346,7 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 
 | 顺序 | 节 | 内容 |
 |------|-----|------|
-| 0 | `[plugin]` | 开关 / `config_version`（当前 `2.4.0`） |
+| 0 | `[plugin]` | 开关 / `config_version`（当前 `2.4.1`） |
 | 1 | `[journal]` | 搜索条数 / 阈值 / embed 并发 / allow_write / 写入去重检测 / SubAgent 提示词开关与轮数 |
 | 2 | `[admin]` | 管理员 QQ |
 | 3 | `[web]` | WebUI 开关 / 端口 / 密码 / bind |

@@ -23,7 +23,7 @@ class PluginSectionConfig(PluginConfigBase):
         json_schema_extra={"label": "启用插件", "hint": "是否启用本插件", "order": 0},
     )
     config_version: str = Field(
-        default="2.4.0",
+        default="2.4.1",
         description="配置版本",
         json_schema_extra={"label": "配置版本", "hint": "当前配置的版本号，一般无需修改", "order": 1},
     )
