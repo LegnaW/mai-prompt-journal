@@ -126,7 +126,9 @@ function loadStatus() {
       (data.notebooks || []).forEach(nb => {
         const cls = nb.status === 'ok' ? 'ok' : nb.status === 'stale' ? 'stale' : 'no-index';
         const icon = nb.status === 'ok' ? '✓' : nb.status === 'stale' ? '✗' : '○';
-        bar.innerHTML += `<span class="nb-badge ${cls}">${nb.name} (${nb.count}${icon})</span>`;
+        const dim = nb.disabled ? 'opacity:0.5;' : '';
+        const tag = nb.disabled ? ' 已禁用' : '';
+        bar.innerHTML += `<span class="nb-badge ${cls}" style="${dim}">${nb.name} (${nb.count}${icon})${tag}</span>`;
       });
       if (!data.notebooks || data.notebooks.length === 0) bar.innerHTML = '<span style="color:#999">暂无笔记本</span>';
     }

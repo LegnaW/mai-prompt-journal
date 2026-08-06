@@ -164,10 +164,17 @@ function loadNotebooks() {
       div.innerHTML = notebooks.map(nb => {
         const statusText = { ok: '索引有效 ✓', stale: '索引失效 ✗', no_index: '未建索引', empty: '空' }[nb.status] || nb.status;
         const deletable = nb.name !== 'default';
-        return `<div style="border:1px solid #eee;border-radius:8px;margin:8px 0;padding:10px;">
+        const toggleable = nb.name !== 'default';
+        const dim = nb.disabled ? 'opacity:0.6;' : '';
+        const disTag = nb.disabled ? ' <span style="color:#e65100;font-size:12px;">已禁用</span>' : '';
+        const toggleBtn = toggleable
+          ? `<button class="btn btn-outline btn-sm" onclick="doToggleNotebook('${esc(nb.name)}')">${nb.disabled ? '启用' : '禁用'}</button>`
+          : `<button class="btn btn-outline btn-sm" disabled title="自带笔记本不可禁用">不可禁用</button>`;
+        return `<div style="border:1px solid #eee;border-radius:8px;margin:8px 0;padding:10px;${dim}">
           <div class="row" style="flex-wrap:wrap;align-items:center;">
-            <span style="flex:1;min-width:0;font-weight:600;">${esc(nb.name)}</span>
+            <span style="flex:1;min-width:0;font-weight:600;">${esc(nb.name)}${disTag}</span>
             <span style="color:#999;font-size:13px;">${nb.count} 条 · ${statusText}</span>
+            ${toggleBtn}
             <button class="btn btn-danger btn-sm" ${deletable ? `onclick="doDeleteNotebook('${esc(nb.name)}', ${nb.count})"` : 'disabled'}>${deletable ? '删除' : '不可删除'}</button>
           </div>
         </div>`;
@@ -214,6 +221,14 @@ function doDeleteNotebook(name, count) {
   api('POST', '/api/notebooks/delete', { name: name }).then(data => {
     if (data.error) { alert(data.error); return; }
     alert(`已删除笔记本 ${name}`);
+    loadNotebooks();
+    loadStatus();
+  }).catch(() => {});
+}
+
+function doToggleNotebook(name) {
+  api('POST', '/api/notebooks/toggle', { name: name }).then(data => {
+    if (data.error) { alert(data.error); return; }
     loadNotebooks();
     loadStatus();
   }).catch(() => {});
