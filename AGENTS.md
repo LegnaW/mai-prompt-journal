@@ -27,6 +27,7 @@
 
 ## 近期更新（dev 分支，未发布）
 
+- **笔记本启用 / 禁用**：新增 `/mpj enable|disable <名>` 命令与 WebUI 笔记本管理页切换按钮，禁用状态持久化于 `data_dir/disabled_notebooks.json`。禁用的笔记本对机器人工具（read/add/modify/delete、SubAgent）及「搜索全部」/ 跨本写入去重**不可见**，但 WebUI 内仍可浏览 / 指定搜索 / 操作数据库 / 去重 / txt 写入 / 导出；`default` 不可禁用。详见下文「笔记本启用 / 禁用」章节。
 - **v2.4.0：新增 `aidraw_prompt_generate` SubAgent 工具**：规划器（聊天侧）传入绘图要求，插件经 `_direct_chat` 直连 LLM 释放一个**子代理**自行检索笔记本（`search_notes`，notebook 可选手动/`all`，提示词提示优先 all），最终返回一段成品英文提示词 + 简短中文说明。**子代理的中间消息与检索结果工具返回后即丢弃，不进宿主 `_chat_history`，省上下文**。开关 `[journal].aidraw_prompt_gen_enabled`（默认关，关闭时规划器看不到该工具）、轮数 `[journal].aidraw_prompt_gen_max_iterations`（默认 4，与 WebUI organize_db 独立）、系统提示词 `[advanced].aidraw_prompt_gen_system_prompt`（空=内置默认）。实现：`core/organize_mixin.py` 的 `_run_aidraw_prompt_gen` / `_execute_search_anywhere` + `plugin.py` 的 `handle_aidraw_prompt_generate`。
 - **v2.4.0：txt 批量写入 / 导入导出的重试配置迁出配置文件**：删除 `[txt_import]` / `[file_io]` 配置节，`max_retries` / `on_failure` 改为**各 WebUI 页面在任务开始前按次配置**（txt 导入页与「导入/导出」页均有表单，默认 3 / interrupt）。中断续跑时从 `import.state.json` / `resume.json` 回读启动时的设置。`_run_import_task` / `_run_export_task` / `_run_file_commit_task` 改为接收参数；`_normalize_retry_params`（`core/export_import_mixin.py`）统一钳制（0–20、interrupt/skip）。
 - **v2.4.0：配置节重排**：`[advanced]`（高级）移至配置页**最底部**；`config_version` 升到 `2.4.0`；`normalize_plugin_config` 新增废弃节清理（`removed_sections`），`[txt_import]`/`[file_io]` 旧键升级时自动丢弃。
@@ -290,6 +291,21 @@ Rule 2 处理多关键词和中文长句（如 query "我想画猫耳女孩" 命
 - **API**：`POST /api/import/preview`（切分预览）/ `POST /api/import/start` / `GET /api/import/status` / `GET /api/import/tmp_notes` / `GET /api/import/log` / `POST /api/import/resolve`。
 - 导入走通用任务中心 `_start_task("import", ...)`，与 rebuild 互斥（进行中拒绝新任务，409）；进度在导入页 + 顶部任务栏同步显示。
 
+## 笔记本启用 / 禁用
+
+管理员可把某本笔记本设为**禁用**：禁用的笔记本对机器人（LLM 工具与 SubAgent）**不可见**、不参与「搜索全部」与跨本写入去重，但 WebUI 内仍**完全可用**（浏览 / 指定搜索 / 操作数据库 / 去重 / txt 写入 / 导出）。适用于"只让 AI 看一部分笔记本"的场景。
+
+- **持久化**：禁用列表存 `data_dir/disabled_notebooks.json`，schema `{"version": 1, "disabled": ["名称", ...]}`，**原子写**（先写 `.tmp` 再改名），缺失/损坏时视为空集合。
+- **`default` 不可禁用**（`_set_notebook_disabled` 直接拒绝）；`tmp` 临时笔记本**恒不在**禁用集合。
+- **三个过滤点**（改禁用逻辑只允许动这三处）：
+  - `_search_all_notebooks`（`core/search_mixin.py`）：搜索「全部」时跳过禁用本——覆盖机器人 `read_aidraw_notes notebook=all`、SubAgent all、WebUI 搜索「全部」、`/mpj search -n all`。
+  - `_pick_dedup_notebooks`（`core/search_mixin.py`）：跨本写入去重只扫**启用本**。
+  - 机器人侧 `_get_notebook_for_bot`（`plugin.py`）：read/add/modify/delete 工具与 SubAgent **单本**解析，禁用本返回 None → 「不存在，可用:（仅启用）」。
+- **错误消息**：机器人工具用 `_list_enabled_notebook_names()`（只列启用本）；管理员 `/mpj` 命令回执仍用 `_list_notebook_names()`（列全部，含禁用本）。
+- **严禁改动清单**：`_execute_search_notes`、`_execute_search_notes_multi`、所有 `_web_*` 端点、管理员命令一律**继续用 `_get_notebook`**（未接禁用过滤），保证禁用本在 WebUI（浏览 / 指定搜索 / 操作数据库 / 去重 / txt 写入 / 导出）与管理员命令下仍可用。
+- **开关入口**：命令 `/mpj enable <名>` / `/mpj disable <名>`（仅管理员）；WebUI 笔记本管理页每本一个切换按钮 → `POST /api/notebooks/toggle`，`_web_status` 返回的笔记本条目新增 `disabled: bool` 字段。
+- **维护提示**：新增**机器人侧**笔记本解析点时用 `_get_notebook_for_bot`；删除笔记本流程需清理禁用集合（`_web_delete_notebook` 已覆盖）；`/mpj rebuild` 与 WebUI 重建仍**包含禁用本**（遍历未改）；该功能不加配置字段故无 `config_version` 变化。
+
 ## 笔记本上传 / 下载（`web/notebooks.html` 「导入 / 导出」选项卡）
 
 > 导入与导出共用一套**统一传输状态机**（持久化在 `data_dir/file_io/`，页面刷新不丢）：
@@ -540,3 +556,4 @@ schema = generate_plugin_config_schema(m.PromptJournalConfig)
 - **`save_embed_progress` 的原子写+备份勿回退**：快照写 `.tmp`→fsync→改名，旧快照旋转为 `.bak`；加载主快照失败回退 `.bak`。别直接写目标文件（强杀会留撕裂 npz）
 - **周期落盘间隔 `_PROGRESS_FLUSH_INTERVAL`**（10s，`core/resume.py`）：改小更抗崩溃但增加大笔记本 IO 开销；改大则强杀丢失的进度更多
 - 新增会中断的长程任务时：置 `interrupted` 状态 + 写续跑缓存 + `_restore_interrupted_tasks` 恢复 + 前端渲染，四者缺一不可
+- **笔记本启用 / 禁用（helper 见 `plugin.py`）**：新增**机器人侧**笔记本解析点时用 `_get_notebook_for_bot`（禁用本返回 None，别误用 `_get_notebook`）；删除笔记本流程需清理禁用集合（`_web_delete_notebook` 已覆盖，新增删除路径别漏 `_is_notebook_disabled`/`_set_notebook_disabled`）；`/mpj rebuild` 与 WebUI 重建仍遍历全部笔记本（**含禁用本**）；该功能不加配置字段故未 bump `config_version`。`_search_all_notebooks` / `_pick_dedup_notebooks` / `_get_notebook_for_bot` 是仅有的三处过滤点，`_execute_search_notes`、`_execute_search_notes_multi`、`_web_*` 端点与管理员命令保留禁用本可用
